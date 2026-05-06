@@ -1,0 +1,5 @@
+target/
+.tapestry-dev/
+.env
+*.log
+.DS_Store
