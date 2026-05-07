@@ -43,6 +43,31 @@ pub struct SearchResult {
     pub score: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskIntent {
+    SearchOrList,
+    GetDetail,
+    CreateOrAdd,
+    UpdateOrEdit,
+    DeleteOrRemove,
+    CheckoutOrPurchase,
+    Unknown,
+}
+
+impl TaskIntent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskIntent::SearchOrList => "search_or_list",
+            TaskIntent::GetDetail => "get_detail",
+            TaskIntent::CreateOrAdd => "create_or_add",
+            TaskIntent::UpdateOrEdit => "update_or_edit",
+            TaskIntent::DeleteOrRemove => "delete_or_remove",
+            TaskIntent::CheckoutOrPurchase => "checkout_or_purchase",
+            TaskIntent::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeRequest {
     method: String,
@@ -67,11 +92,12 @@ pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchRes
     );
 
     let tokens = query_tokens(query);
-    let mut scored: Vec<(usize, &ToolDefinition)> = spec
+    let intent = classify_task_intent(query);
+    let mut scored: Vec<(i32, &ToolDefinition)> = spec
         .tools
         .iter()
         .filter_map(|tool| {
-            let score = search_score(tool, &tokens);
+            let score = search_score(tool, &tokens, intent);
             (score > 0 || query.trim().is_empty()).then_some((score, tool))
         })
         .collect();
@@ -91,7 +117,7 @@ pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchRes
             summary: tool.description.clone(),
             safety: tool.safety.classification.clone(),
             confidence: tool.confidence.overall,
-            score,
+            score: score.max(0) as usize,
         })
         .collect()
 }
@@ -772,7 +798,52 @@ fn query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn search_score(tool: &ToolDefinition, tokens: &[String]) -> usize {
+pub fn classify_task_intent(task: &str) -> TaskIntent {
+    let task_lower = task.to_ascii_lowercase();
+    if contains_any_phrase(&task_lower, &["delete", "remove", "cancel"]) {
+        TaskIntent::DeleteOrRemove
+    } else if contains_any_phrase(&task_lower, &["update", "edit", "change", "modify"]) {
+        TaskIntent::UpdateOrEdit
+    } else if contains_any_phrase(
+        &task_lower,
+        &[
+            "checkout", "buy", "purchase", "book", "pay", "basket", "cart",
+        ],
+    ) {
+        TaskIntent::CheckoutOrPurchase
+    } else if contains_any_phrase(&task_lower, &["create", "add", "insert", "new", "save"]) {
+        TaskIntent::CreateOrAdd
+    } else if contains_any_phrase(
+        &task_lower,
+        &["details", "detail", "open", "inspect", "by id", "specific"],
+    ) {
+        TaskIntent::GetDetail
+    } else if contains_any_phrase(
+        &task_lower,
+        &[
+            "search",
+            "find",
+            "list",
+            "show",
+            "browse",
+            "look up",
+            "view",
+            "get products",
+            "get flights",
+            "get holidays",
+        ],
+    ) {
+        TaskIntent::SearchOrList
+    } else {
+        TaskIntent::Unknown
+    }
+}
+
+fn contains_any_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| text.contains(phrase))
+}
+
+fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) -> i32 {
     let name = tool.name.to_ascii_lowercase();
     let description = tool.description.to_ascii_lowercase();
     let path = tool.path.to_ascii_lowercase();
@@ -795,7 +866,7 @@ fn search_score(tool: &ToolDefinition, tokens: &[String]) -> usize {
         .to_ascii_lowercase();
     let warnings = tool.warnings.join(" ").to_ascii_lowercase();
     let resource_keywords = resource_search_keywords(&tool.resource_kind);
-    let mut raw_score: usize = tokens
+    let mut raw_score: i32 = tokens
         .iter()
         .map(|token| {
             if name.contains(token) {
@@ -823,6 +894,7 @@ fn search_score(tool: &ToolDefinition, tokens: &[String]) -> usize {
         })
         .sum();
 
+    raw_score += intent_search_adjustment(tool, intent);
     if tool.resource_kind == ResourceKind::CommerceApi
         && has_resource_intent(tokens, &tool.resource_kind)
     {
@@ -903,6 +975,134 @@ fn has_commerce_intent(tokens: &[String]) -> bool {
     tokens
         .iter()
         .any(|token| commerce_keywords().contains(&token.as_str()))
+}
+
+fn intent_search_adjustment(tool: &ToolDefinition, intent: TaskIntent) -> i32 {
+    let mut score = 0;
+    let name = tool.name.to_ascii_lowercase();
+    let description = tool.description.to_ascii_lowercase();
+    let path = tool.path.to_ascii_lowercase();
+    let text = format!("{name} {description} {path}");
+    let graphql_operation_type = tool
+        .graphql
+        .as_ref()
+        .and_then(|graphql| graphql.operation_type.as_deref())
+        .map(|value| value.to_ascii_lowercase());
+
+    let has_query_list_terms = contains_any_phrase(
+        &text,
+        &[
+            "search", "query", "list", "products", "flights", "holidays", "items",
+        ],
+    );
+    let has_write_terms = contains_any_phrase(
+        &text,
+        &["create", "update", "delete", "remove", "cancel", "submit"],
+    );
+    let has_detail_terms = contains_any_phrase(&text, &["detail", "details", "{id}", "by id"]);
+    let has_cart_terms = contains_any_phrase(
+        &text,
+        &[
+            "cart", "basket", "checkout", "book", "booking", "pay", "purchase", "add",
+        ],
+    );
+    let has_add_terms = contains_any_phrase(&text, &["add", "create", "save", "insert", "new"]);
+
+    match intent {
+        TaskIntent::SearchOrList => {
+            match tool.safety.classification {
+                SafetyClassification::Read => score += 20,
+                SafetyClassification::Unknown => score -= 10,
+                SafetyClassification::Write => score -= 24,
+            }
+            if matches!(graphql_operation_type.as_deref(), Some("query")) {
+                score += 12;
+            }
+            if matches!(graphql_operation_type.as_deref(), Some("mutation")) {
+                score -= 18;
+            }
+            if tool.resource_kind == ResourceKind::CommerceApi {
+                score += 14;
+            }
+            if tool.resource_kind == ResourceKind::ApiAction {
+                score += 8;
+            }
+            if has_query_list_terms {
+                score += 10;
+            }
+            if has_write_terms {
+                score -= 18;
+            }
+            if is_static_resource_kind(&tool.resource_kind) {
+                score -= 40;
+            }
+        }
+        TaskIntent::GetDetail => {
+            match tool.safety.classification {
+                SafetyClassification::Read => score += 16,
+                SafetyClassification::Unknown => score += 2,
+                SafetyClassification::Write => score -= 10,
+            }
+            if !tool.path_params.is_empty() {
+                score += 12;
+            }
+            if has_detail_terms {
+                score += 10;
+            }
+        }
+        TaskIntent::CreateOrAdd => {
+            match tool.safety.classification {
+                SafetyClassification::Write => score += 18,
+                SafetyClassification::Unknown => score += 4,
+                SafetyClassification::Read => score -= 8,
+            }
+            if tool.approved {
+                score += 6;
+            }
+            if has_add_terms || has_cart_terms {
+                score += 12;
+            }
+            if tool.resource_kind == ResourceKind::CommerceApi {
+                score += 10;
+            }
+        }
+        TaskIntent::UpdateOrEdit => {
+            match tool.safety.classification {
+                SafetyClassification::Write => score += 18,
+                SafetyClassification::Unknown => score += 4,
+                SafetyClassification::Read => score -= 8,
+            }
+            if contains_any_phrase(&text, &["update", "edit", "change", "modify"]) {
+                score += 12;
+            }
+        }
+        TaskIntent::DeleteOrRemove => {
+            match tool.safety.classification {
+                SafetyClassification::Write => score += 18,
+                SafetyClassification::Unknown => score += 2,
+                SafetyClassification::Read => score -= 12,
+            }
+            if contains_any_phrase(&text, &["delete", "remove", "cancel"]) {
+                score += 12;
+            }
+        }
+        TaskIntent::CheckoutOrPurchase => {
+            match tool.safety.classification {
+                SafetyClassification::Write => score += 16,
+                SafetyClassification::Unknown => score += 6,
+                SafetyClassification::Read => score += 4,
+            }
+            if tool.resource_kind == ResourceKind::CommerceApi {
+                score += 16;
+            }
+            if has_cart_terms {
+                score += 16;
+            }
+        }
+        TaskIntent::Unknown => {}
+    }
+
+    score
 }
 
 fn commerce_keywords() -> &'static [&'static str] {
@@ -1388,6 +1588,46 @@ mod tests {
     }
 
     #[test]
+    fn task_intent_classifier_prefers_most_specific_category() {
+        assert_eq!(
+            classify_task_intent("Search for products"),
+            TaskIntent::SearchOrList
+        );
+        assert_eq!(
+            classify_task_intent("Add item to cart"),
+            TaskIntent::CheckoutOrPurchase
+        );
+        assert_eq!(
+            classify_task_intent("Delete booking"),
+            TaskIntent::DeleteOrRemove
+        );
+    }
+
+    #[test]
+    fn search_penalizes_write_tools_for_search_intent() {
+        let read = tool(
+            "search_flights",
+            "GET",
+            "/api/flights/search",
+            true,
+            SafetyClassification::Read,
+        );
+        let mut write = tool(
+            "create_clients.SearchResultsOption",
+            "POST",
+            "/api/search",
+            false,
+            SafetyClassification::Write,
+        );
+        write.description = "Search results option submission".to_string();
+        let spec = spec_with_base("http://127.0.0.1:1", vec![write, read]);
+
+        let results = search_tools(&spec, "Search for flights", 5);
+
+        assert_eq!(results[0].name, "search_flights");
+    }
+
+    #[test]
     fn search_ranks_commerce_product_tool_above_wix_manifest() {
         let spec = spec_with_base(
             "http://127.0.0.1:1",
@@ -1404,6 +1644,27 @@ mod tests {
         let spec = spec_with_base("http://127.0.0.1:1", vec![wix_manifest_tool(), cart_tool()]);
 
         let results = search_tools(&spec, "cart checkout basket", 5);
+
+        assert_eq!(results[0].name, "create_add-line-items");
+    }
+
+    #[test]
+    fn checkout_intent_ranks_cart_write_tool() {
+        let spec = spec_with_base(
+            "http://127.0.0.1:1",
+            vec![
+                tool(
+                    "list_items",
+                    "GET",
+                    "/api/items",
+                    true,
+                    SafetyClassification::Read,
+                ),
+                cart_tool(),
+            ],
+        );
+
+        let results = search_tools(&spec, "Search for basket checkout", 5);
 
         assert_eq!(results[0].name, "create_add-line-items");
     }

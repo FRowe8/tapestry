@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{fs, path::PathBuf};
 use tracing::info;
@@ -714,6 +714,8 @@ struct BenchmarkReport {
     total_sites: usize,
     success_count: usize,
     failure_count: usize,
+    expected_match_count: usize,
+    drift_count: usize,
     cases: Vec<BenchmarkCaseReport>,
 }
 
@@ -721,19 +723,25 @@ struct BenchmarkReport {
 struct BenchmarkCaseReport {
     site: String,
     task: String,
+    expected_outcome: String,
+    expected_tool: Option<String>,
     selected_tool: Option<String>,
     success: bool,
     failure_type: Option<String>,
     failure_bucket: String,
+    outcome_matches_expected: bool,
+    tool_matches_expected: Option<bool>,
     review_grade: Option<String>,
     diagnose_summary: DiagnoseSummary,
     ranking_note: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 struct BenchmarkCase {
-    site: &'static str,
-    task: &'static str,
+    site: String,
+    task: String,
+    expected_outcome: String,
+    expected_tool: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -771,8 +779,8 @@ fn validate_site(
 fn run_benchmark_suite() -> Result<BenchmarkReport> {
     let mut cases = Vec::new();
     for case in benchmark_cases() {
-        let spec = load_site_spec(case.site)?;
-        let observations = load_site_observations(case.site)?;
+        let spec = load_site_spec(&case.site)?;
+        let observations = load_site_observations(&case.site)?;
         let options = tapestry_runtime::RuntimeOptions {
             max_pages: 1,
             allow_har_replay: true,
@@ -780,17 +788,30 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
             offline_har_replay: true,
             ..tapestry_runtime::RuntimeOptions::default()
         };
-        let report = validate_site(&spec, &observations, case.task, &options);
+        let report = validate_site(&spec, &observations, &case.task, &options);
         let review = review_toolspec(&spec, None);
         let selected_tool_grade = selected_tool_grade(&report, &review);
         let failure_bucket = failure_bucket_for_benchmark(&report);
+        let outcome_matches_expected = benchmark_outcome_matches(&case.expected_outcome, &report);
+        let tool_matches_expected = case.expected_tool.as_ref().map(|expected_tool| {
+            report
+                .agent_task
+                .top_tool_used
+                .as_deref()
+                .map(|actual_tool| actual_tool == expected_tool.as_str())
+                .unwrap_or(false)
+        });
         cases.push(BenchmarkCaseReport {
             site: report.site.clone(),
             task: report.agent_task.task.clone(),
+            expected_outcome: case.expected_outcome,
+            expected_tool: case.expected_tool,
             selected_tool: report.agent_task.top_tool_used.clone(),
             success: report.agent_task.success,
             failure_type: report.agent_task.failure_type.clone(),
             failure_bucket,
+            outcome_matches_expected,
+            tool_matches_expected,
             review_grade: selected_tool_grade,
             diagnose_summary: report.diagnose_summary.clone(),
             ranking_note: report.agent_task.ranking_note.clone(),
@@ -799,42 +820,43 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
 
     let success_count = cases.iter().filter(|case| case.success).count();
     let failure_count = cases.len().saturating_sub(success_count);
+    let expected_match_count = cases
+        .iter()
+        .filter(|case| case.outcome_matches_expected)
+        .count();
+    let drift_count = cases.len().saturating_sub(expected_match_count);
 
     Ok(BenchmarkReport {
         total_sites: cases.len(),
         success_count,
         failure_count,
+        expected_match_count,
+        drift_count,
         cases,
     })
 }
 
 fn benchmark_cases() -> Vec<BenchmarkCase> {
-    vec![
-        BenchmarkCase {
-            site: "argos",
-            task: "Search for products",
-        },
-        BenchmarkCase {
-            site: "tesco",
-            task: "basket search groceries",
-        },
-        BenchmarkCase {
-            site: "next",
-            task: "Search for products",
-        },
-        BenchmarkCase {
-            site: "justkandy",
-            task: "cart checkout basket",
-        },
-        BenchmarkCase {
-            site: "melvor",
-            task: "language translations",
-        },
-        BenchmarkCase {
-            site: "amazon",
-            task: "Search for products",
-        },
-    ]
+    serde_json::from_str(include_str!("../benchmark_cases.json"))
+        .expect("benchmark_cases.json must contain a valid benchmark case array")
+}
+
+fn benchmark_outcome_matches(expected: &str, report: &ValidateReport) -> bool {
+    for expected in expected.split('|').map(str::trim) {
+        if expected.is_empty() {
+            continue;
+        }
+        if expected == "success" && report.agent_task.success {
+            return true;
+        }
+
+        if !report.agent_task.success && report.agent_task.failure_type.as_deref() == Some(expected)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn selected_tool_grade(report: &ValidateReport, review: &ReviewReport) -> Option<String> {
@@ -886,6 +908,10 @@ fn format_benchmark_text(report: &BenchmarkReport) -> String {
             "Result counts: {} success, {} failure",
             report.success_count, report.failure_count
         ),
+        format!(
+            "Expected matches: {} drift: {}",
+            report.expected_match_count, report.drift_count
+        ),
         String::new(),
         "Cases:".to_string(),
     ];
@@ -894,15 +920,26 @@ fn format_benchmark_text(report: &BenchmarkReport) -> String {
         let review_grade = case.review_grade.as_deref().unwrap_or("none");
         let selected_tool = case.selected_tool.as_deref().unwrap_or("none");
         let failure_type = case.failure_type.as_deref().unwrap_or("none");
+        let expected_tool = case.expected_tool.as_deref().unwrap_or("none");
+        let outcome_match = case.outcome_matches_expected;
+        let tool_match = case
+            .tool_matches_expected
+            .map_or("n/a".to_string(), |value| value.to_string());
         out.push(format!(
-            "- site={} task=\"{}\" selected_tool={} success={} failure_type={} failure_bucket={} review_grade={}",
+            "- site={} task=\"{}\" expected={} selected_tool={} success={} failure_type={} failure_bucket={} outcome_match={} review_grade={}",
             case.site,
             case.task,
+            case.expected_outcome,
             selected_tool,
             case.success,
             failure_type,
             case.failure_bucket,
+            outcome_match,
             review_grade
+        ));
+        out.push(format!(
+            "  expected_tool={} tool_match={}",
+            expected_tool, tool_match
         ));
         out.push(format!(
             "  diagnose: obs={} api={} tools={} response_bodies={} json={} graphql={} mapped={}",
@@ -930,14 +967,15 @@ fn run_agent_validation(
     options: &tapestry_runtime::RuntimeOptions,
 ) -> AgentValidation {
     let ranking_note = |selection: &AgentToolSelection| {
+        let mut notes = vec![format!("Intent: {}", selection.intent.as_str())];
+        notes.extend(selection.ranking_notes.iter().cloned());
         if options.offline_har_replay {
-            Some(format!(
+            notes.push(format!(
                 "Offline ranking considered replayability. Selected replayable tool: {}.",
                 selection.result.name
-            ))
-        } else {
-            selection.ranking_notes.first().cloned()
+            ));
         }
+        Some(notes.join(" "))
     };
 
     let Some(selection) = select_agent_tool(spec, observations, task, options) else {
@@ -2022,6 +2060,10 @@ fn body_contains_telemetry_key_cli(value: Option<&Value>) -> bool {
     }
 }
 
+fn contains_any_cli(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| text.contains(phrase))
+}
+
 fn contains_semantic_word_cli(segment: &str) -> bool {
     let segment = segment.to_ascii_lowercase();
     [
@@ -2084,6 +2126,10 @@ fn run_agent_task(
     if trace {
         out.push(format!("[agent] search_tools query=\"{task}\""));
         out.push(format!(
+            "[agent] intent={}",
+            tapestry_runtime::classify_task_intent(task).as_str()
+        ));
+        out.push(format!(
             "[agent] execution_mode={}",
             agent_execution_mode(options)
         ));
@@ -2094,7 +2140,7 @@ fn run_agent_task(
         return out.join("\n");
     };
 
-    if trace && options.offline_har_replay {
+    if trace {
         out.extend(selection.ranking_notes.iter().cloned());
     }
 
@@ -2164,6 +2210,7 @@ struct AgentToolSelection {
     result: tapestry_runtime::SearchResult,
     plan: ArgumentPlan,
     replayable: bool,
+    intent: tapestry_runtime::TaskIntent,
     ranking_notes: Vec<String>,
 }
 
@@ -2195,6 +2242,7 @@ fn select_agent_tool(
     task: &str,
     options: &tapestry_runtime::RuntimeOptions,
 ) -> Option<AgentToolSelection> {
+    let intent = tapestry_runtime::classify_task_intent(task);
     let limit = spec.tools.len().max(5);
     let mut candidates = tapestry_runtime::search_tools(spec, task, limit)
         .into_iter()
@@ -2206,7 +2254,8 @@ fn select_agent_tool(
                 .find(|tool| tool.id == result.id || tool.name == result.id)?;
             let plan = plan_agent_arguments(task, Some(tool), observations, &schema);
             let replayable = options.offline_har_replay && is_replayable(tool, observations);
-            let ranking = agent_selection_score(&result, tool, &schema, &plan, replayable, options);
+            let ranking =
+                agent_selection_score(&result, tool, &schema, &plan, replayable, intent, options);
             Some((ranking.score, result, plan, replayable, ranking.notes))
         })
         .collect::<Vec<_>>();
@@ -2227,6 +2276,7 @@ fn select_agent_tool(
                 result,
                 plan,
                 replayable,
+                intent,
                 ranking_notes,
             },
         )
@@ -2238,10 +2288,14 @@ fn agent_selection_score(
     schema: &Value,
     plan: &ArgumentPlan,
     replayable: bool,
+    intent: tapestry_runtime::TaskIntent,
     options: &tapestry_runtime::RuntimeOptions,
 ) -> RankingScore {
     let mut score = result.score as i32 * 3;
     let mut notes = Vec::new();
+    let intent_adjustment = intent_ranking_adjustment(result, tool, intent);
+    score += intent_adjustment.score;
+    notes.extend(intent_adjustment.notes);
     let required_count = required_fields(schema).len() as i32;
     score -= plan.missing.len() as i32 * 30;
     if required_count > 0 && plan.missing.is_empty() {
@@ -2302,6 +2356,287 @@ fn agent_selection_score(
             ));
         }
     }
+    RankingScore { score, notes }
+}
+
+fn intent_ranking_adjustment(
+    result: &tapestry_runtime::SearchResult,
+    tool: &tapestry_core::ToolDefinition,
+    intent: tapestry_runtime::TaskIntent,
+) -> RankingScore {
+    let mut score = 0;
+    let mut notes = Vec::new();
+    let name = result.name.to_ascii_lowercase();
+    let path = tool.path.to_ascii_lowercase();
+    let description = tool.description.to_ascii_lowercase();
+    let text = format!("{name} {path} {description}");
+    let has_search_terms = contains_any_cli(
+        &text,
+        &[
+            "search", "query", "list", "products", "flights", "holidays", "items",
+        ],
+    );
+    let has_write_terms = contains_any_cli(
+        &text,
+        &["create", "update", "delete", "remove", "cancel", "submit"],
+    );
+    let has_detail_terms = contains_any_cli(&text, &["detail", "details", "{id}", "by id"]);
+    let has_cart_terms = contains_any_cli(
+        &text,
+        &[
+            "cart", "basket", "checkout", "book", "booking", "pay", "purchase", "add",
+        ],
+    );
+    let has_add_terms = contains_any_cli(&text, &["add", "create", "save", "insert", "new"]);
+    let graphql_operation_type = tool
+        .graphql
+        .as_ref()
+        .and_then(|graphql| graphql.operation_type.as_deref())
+        .map(|value| value.to_ascii_lowercase());
+
+    match intent {
+        tapestry_runtime::TaskIntent::SearchOrList => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Read => {
+                    score += 24;
+                    notes.push(format!(
+                        "[agent] rank boost read_search_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score -= 10;
+                    notes.push(format!(
+                        "[agent] rank penalty unknown_safety_for_search {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Write => {
+                    score -= 24;
+                    notes.push(format!(
+                        "[agent] rank penalty write_tool_for_search {}",
+                        result.name
+                    ));
+                }
+            }
+            if matches!(graphql_operation_type.as_deref(), Some("query")) {
+                score += 12;
+                notes.push(format!(
+                    "[agent] rank boost graphql_query_tool {}",
+                    result.name
+                ));
+            }
+            if matches!(graphql_operation_type.as_deref(), Some("mutation")) {
+                score -= 18;
+                notes.push(format!(
+                    "[agent] rank penalty graphql_mutation_for_search {}",
+                    result.name
+                ));
+            }
+            if tool.resource_kind == tapestry_core::ResourceKind::CommerceApi {
+                score += 14;
+                notes.push(format!(
+                    "[agent] rank boost commerce_api_search_tool {}",
+                    result.name
+                ));
+            }
+            if tool.resource_kind == tapestry_core::ResourceKind::ApiAction {
+                score += 8;
+                notes.push(format!(
+                    "[agent] rank boost api_action_search_candidate {}",
+                    result.name
+                ));
+            }
+            if has_search_terms {
+                score += 10;
+                notes.push(format!(
+                    "[agent] rank boost search_semantics {}",
+                    result.name
+                ));
+            }
+            if has_write_terms {
+                score -= 18;
+                notes.push(format!(
+                    "[agent] rank penalty write_semantics_for_search {}",
+                    result.name
+                ));
+            }
+            if is_static_resource_kind(&tool.resource_kind) {
+                score -= 40;
+                notes.push(format!(
+                    "[agent] rank penalty {}_for_search {}",
+                    resource_kind_label(&tool.resource_kind),
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::GetDetail => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Read => {
+                    score += 16;
+                    notes.push(format!(
+                        "[agent] rank boost read_detail_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score += 2;
+                }
+                tapestry_core::SafetyClassification::Write => {
+                    score -= 10;
+                    notes.push(format!(
+                        "[agent] rank penalty write_tool_for_detail {}",
+                        result.name
+                    ));
+                }
+            }
+            if !tool.path_params.is_empty() {
+                score += 12;
+                notes.push(format!(
+                    "[agent] rank boost path_params_for_detail {}",
+                    result.name
+                ));
+            }
+            if has_detail_terms {
+                score += 10;
+                notes.push(format!(
+                    "[agent] rank boost detail_semantics {}",
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::CreateOrAdd => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Write => {
+                    score += 18;
+                    notes.push(format!(
+                        "[agent] rank boost write_create_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score += 4;
+                }
+                tapestry_core::SafetyClassification::Read => {
+                    score -= 8;
+                    notes.push(format!(
+                        "[agent] rank penalty read_tool_for_create {}",
+                        result.name
+                    ));
+                }
+            }
+            if tool.approved {
+                score += 6;
+                notes.push(format!(
+                    "[agent] rank boost approved_write_tool {}",
+                    result.name
+                ));
+            }
+            if has_add_terms || has_cart_terms {
+                score += 12;
+                notes.push(format!(
+                    "[agent] rank boost add_or_cart_semantics {}",
+                    result.name
+                ));
+            }
+            if tool.resource_kind == tapestry_core::ResourceKind::CommerceApi {
+                score += 10;
+                notes.push(format!(
+                    "[agent] rank boost commerce_api_create_tool {}",
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::UpdateOrEdit => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Write => {
+                    score += 18;
+                    notes.push(format!(
+                        "[agent] rank boost write_update_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score += 4;
+                }
+                tapestry_core::SafetyClassification::Read => {
+                    score -= 8;
+                    notes.push(format!(
+                        "[agent] rank penalty read_tool_for_update {}",
+                        result.name
+                    ));
+                }
+            }
+            if contains_any_cli(&text, &["update", "edit", "change", "modify"]) {
+                score += 12;
+                notes.push(format!(
+                    "[agent] rank boost update_semantics {}",
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::DeleteOrRemove => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Write => {
+                    score += 18;
+                    notes.push(format!(
+                        "[agent] rank boost write_delete_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score += 2;
+                }
+                tapestry_core::SafetyClassification::Read => {
+                    score -= 12;
+                    notes.push(format!(
+                        "[agent] rank penalty read_tool_for_delete {}",
+                        result.name
+                    ));
+                }
+            }
+            if contains_any_cli(&text, &["delete", "remove", "cancel"]) {
+                score += 12;
+                notes.push(format!(
+                    "[agent] rank boost delete_semantics {}",
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::CheckoutOrPurchase => {
+            match tool.safety.classification {
+                tapestry_core::SafetyClassification::Write => {
+                    score += 16;
+                    notes.push(format!(
+                        "[agent] rank boost write_checkout_tool {}",
+                        result.name
+                    ));
+                }
+                tapestry_core::SafetyClassification::Unknown => {
+                    score += 6;
+                }
+                tapestry_core::SafetyClassification::Read => {
+                    score += 4;
+                }
+            }
+            if tool.resource_kind == tapestry_core::ResourceKind::CommerceApi {
+                score += 16;
+                notes.push(format!(
+                    "[agent] rank boost commerce_api_checkout_tool {}",
+                    result.name
+                ));
+            }
+            if has_cart_terms {
+                score += 16;
+                notes.push(format!(
+                    "[agent] rank boost cart_or_checkout_semantics {}",
+                    result.name
+                ));
+            }
+        }
+        tapestry_runtime::TaskIntent::Unknown => {}
+    }
+
     RankingScore { score, notes }
 }
 
@@ -3057,8 +3392,10 @@ mod tests {
         );
 
         assert!(output.contains("[agent] search_tools query=\"List 5 items\""));
+        assert!(output.contains("[agent] intent=search_or_list"));
         assert!(output.contains("[agent] execution_mode=live_http"));
         assert!(output.contains("[agent] selected tool=list_items score="));
+        assert!(output.contains("[agent] rank boost read_search_tool list_items"));
         assert!(output.contains("[agent] schema loaded"));
         assert!(output.contains("\"limit\":5"));
         assert!(output.contains("[agent] arg limit inferred from number_from_task"));
@@ -3076,6 +3413,46 @@ mod tests {
 
         assert!(output.contains("[agent] execution_mode=offline_har_replay"));
         assert!(output.contains("[agent] call_tool success"));
+    }
+
+    #[test]
+    fn agent_task_trace_includes_write_tool_penalty_for_search_intent() {
+        let mut write_tool = create_tool(false);
+        write_tool.name = "create_clients.SearchResultsOption".to_string();
+        write_tool.id = write_tool.name.clone();
+        write_tool.description = "Search flights results option".to_string();
+        write_tool.path = "/api/flights/search".to_string();
+        let spec = spec(vec![write_tool]);
+        let output = run_agent_task(
+            &spec,
+            &[],
+            "Search for flights",
+            true,
+            &tapestry_runtime::RuntimeOptions::default(),
+        );
+
+        assert!(output.contains("[agent] intent=search_or_list"));
+        assert!(output.contains("[agent] rank penalty write_tool_for_search"));
+        assert!(output.contains("SearchResultsOption"));
+    }
+
+    #[test]
+    fn checkout_intent_trace_prefers_cart_write_tool() {
+        let mut cart = create_tool(true);
+        cart.name = "create_add-line-items".to_string();
+        cart.id = cart.name.clone();
+        cart.path = "/checkout/cart".to_string();
+        let spec = spec(vec![list_tool(), cart]);
+        let output = run_agent_task(
+            &spec,
+            &[],
+            "Add item to cart",
+            true,
+            &tapestry_runtime::RuntimeOptions::default(),
+        );
+
+        assert!(output.contains("[agent] intent=checkout_or_purchase"));
+        assert!(output.contains("[agent] rank boost write_checkout_tool create_add-line-items"));
     }
 
     #[test]
@@ -3854,15 +4231,21 @@ mod tests {
     #[test]
     fn benchmark_suite_freezes_expected_sites_and_tasks() {
         let cases = benchmark_cases();
-        let sites = cases.iter().map(|case| case.site).collect::<Vec<_>>();
+        let sites = cases
+            .iter()
+            .map(|case| case.site.as_str())
+            .collect::<Vec<_>>();
 
-        assert_eq!(cases.len(), 6);
+        assert_eq!(cases.len(), 9);
         assert!(sites.contains(&"tesco"));
         assert!(sites.contains(&"next"));
         assert!(sites.contains(&"justkandy"));
         assert!(sites.contains(&"melvor"));
         assert!(sites.contains(&"argos"));
         assert!(sites.contains(&"amazon"));
+        assert!(sites.contains(&"wowhead"));
+        assert!(sites.contains(&"skyscanner"));
+        assert!(sites.contains(&"onthebeach"));
     }
 
     #[test]
@@ -3871,13 +4254,19 @@ mod tests {
             total_sites: 1,
             success_count: 1,
             failure_count: 0,
+            expected_match_count: 1,
+            drift_count: 0,
             cases: vec![BenchmarkCaseReport {
                 site: "fixture".to_string(),
                 task: "Search for products".to_string(),
+                expected_outcome: "success".to_string(),
+                expected_tool: Some("list_items".to_string()),
                 selected_tool: Some("list_items".to_string()),
                 success: true,
                 failure_type: None,
                 failure_bucket: "success".to_string(),
+                outcome_matches_expected: true,
+                tool_matches_expected: Some(true),
                 review_grade: Some("A".to_string()),
                 diagnose_summary: DiagnoseSummary {
                     total_observations: 1,
@@ -3902,8 +4291,11 @@ mod tests {
 
         assert_eq!(value["total_sites"], 1);
         assert_eq!(value["cases"][0]["site"], "fixture");
+        assert_eq!(value["cases"][0]["expected_outcome"], "success");
         assert_eq!(value["cases"][0]["failure_bucket"], "success");
         assert!(text.contains("Benchmark suite: 1 site(s)"));
+        assert!(text.contains("Expected matches: 1 drift: 0"));
+        assert!(text.contains("expected=success"));
         assert!(text.contains("failure_bucket=success"));
         assert!(text.contains("review_grade=A"));
     }

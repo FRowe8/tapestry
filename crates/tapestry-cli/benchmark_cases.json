@@ -1,0 +1,54 @@
+[
+  {
+    "site": "argos",
+    "task": "Search for products",
+    "expected_outcome": "no_replayable_tool"
+  },
+  {
+    "site": "tesco",
+    "task": "basket search groceries",
+    "expected_outcome": "success",
+    "expected_tool": "taxonomy"
+  },
+  {
+    "site": "next",
+    "task": "Search for products",
+    "expected_outcome": "success",
+    "expected_tool": "list_index.json"
+  },
+  {
+    "site": "justkandy",
+    "task": "cart checkout basket",
+    "expected_outcome": "success",
+    "expected_tool": "list_query"
+  },
+  {
+    "site": "melvor",
+    "task": "language translations",
+    "expected_outcome": "success",
+    "expected_tool": "list_en.json"
+  },
+  {
+    "site": "amazon",
+    "task": "Search for products",
+    "expected_outcome": "success",
+    "expected_tool": "list_cart"
+  },
+  {
+    "site": "wowhead",
+    "task": "Search for items",
+    "expected_outcome": "success",
+    "expected_tool": "list_classic-wow-consumables-list-for-each-class"
+  },
+  {
+    "site": "skyscanner",
+    "task": "Search for flights",
+    "expected_outcome": "approval_required|success"
+  },
+  {
+    "site": "onthebeach",
+    "task": "Search for holidays",
+    "expected_outcome": "success",
+    "expected_tool": "recommended_deals_search_holidays_by_destination_ids"
+  }
+]
