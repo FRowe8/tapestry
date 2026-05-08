@@ -248,6 +248,7 @@ fn main() -> Result<()> {
         } => {
             validate_site_name(&site)?;
             info!(command = "record", site, url = %url, "starting CDP capture");
+            print_record_guidance();
             let record = tapestry_input::record(
                 &url,
                 &tapestry_input::RecordOptions {
@@ -493,33 +494,33 @@ fn load_site_observations(site: &str) -> Result<Vec<tapestry_core::Observation>>
 }
 
 fn format_record_summary(site: &str, observations: &[tapestry_core::Observation]) -> String {
-    let candidate_api_observations = observations
-        .iter()
-        .filter(|obs| is_candidate_api_observation(obs))
-        .count();
-    let observations_with_response_bodies = observations
-        .iter()
-        .filter(|obs| obs.response_body.is_some())
-        .count();
-    let json_responses = observations
-        .iter()
-        .filter(|obs| has_json_signal_cli(obs))
-        .count();
-    let graphql_requests = observations
-        .iter()
-        .filter(|obs| graphql_operations_cli(obs).len() > 0)
-        .count();
+    let summary = tapestry_input::CaptureSummary::from_observations(observations);
+    let coverage = round2(summary.response_body_coverage() * 100.0);
 
     format!(
-        "Recorded {} observations\nCandidate API observations: {}\nObservations with response bodies: {}\nJSON responses: {}\nGraphQL requests: {}\nSaved to {}\nNext: tapestry generate {}",
-        observations.len(),
-        candidate_api_observations,
-        observations_with_response_bodies,
-        json_responses,
-        graphql_requests,
+        "Recorded {} observations\nCapture quality: {}\nAPI observations: {}\nResponse body coverage: {:.0}%\nReplayable tools (estimate): {}\nMissing response bodies: {}\nJSON responses: {}\nGraphQL requests: {}\nRecommended next action: {}\nSaved to {}\nNext: tapestry generate {}",
+        summary.total_observations,
+        summary.quality_grade(),
+        summary.candidate_api_observations,
+        coverage,
+        summary.replayable_tool_hint(),
+        summary
+            .total_observations
+            .saturating_sub(summary.observations_with_response_bodies),
+        summary.json_responses,
+        summary.graphql_requests,
+        summary.recommended_next_action(),
         site_dir(site).join("observations.json").display(),
         site
     )
+}
+
+fn print_record_guidance() {
+    eprintln!("{}", record_guidance_text());
+}
+
+fn record_guidance_text() -> &'static str {
+    "Now perform:\n- search\n- open detail\n- add to basket\n- view basket\nPress Enter when done."
 }
 
 fn runtime_options_for(
@@ -722,6 +723,7 @@ struct BenchmarkReport {
 #[derive(Debug, Serialize)]
 struct BenchmarkCaseReport {
     site: String,
+    capture_variant: Option<String>,
     task: String,
     expected_outcome: String,
     expected_tool: Option<String>,
@@ -739,6 +741,8 @@ struct BenchmarkCaseReport {
 #[derive(Debug, Clone, Deserialize)]
 struct BenchmarkCase {
     site: String,
+    #[serde(default)]
+    capture_variant: Option<String>,
     task: String,
     expected_outcome: String,
     expected_tool: Option<String>,
@@ -803,6 +807,7 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
         });
         cases.push(BenchmarkCaseReport {
             site: report.site.clone(),
+            capture_variant: case.capture_variant,
             task: report.agent_task.task.clone(),
             expected_outcome: case.expected_outcome,
             expected_tool: case.expected_tool,
@@ -926,8 +931,9 @@ fn format_benchmark_text(report: &BenchmarkReport) -> String {
             .tool_matches_expected
             .map_or("n/a".to_string(), |value| value.to_string());
         out.push(format!(
-            "- site={} task=\"{}\" expected={} selected_tool={} success={} failure_type={} failure_bucket={} outcome_match={} review_grade={}",
+            "- site={}{} task=\"{}\" expected={} selected_tool={} success={} failure_type={} failure_bucket={} outcome_match={} review_grade={}",
             case.site,
+            case.capture_variant.as_deref().map(|variant| format!(" variant={variant}")).unwrap_or_default(),
             case.task,
             case.expected_outcome,
             selected_tool,
@@ -3416,6 +3422,54 @@ mod tests {
     }
 
     #[test]
+    fn record_guidance_text_is_actionable() {
+        let guidance = record_guidance_text();
+
+        assert!(guidance.contains("search"));
+        assert!(guidance.contains("open detail"));
+        assert!(guidance.contains("add to basket"));
+        assert!(guidance.contains("Press Enter when done."));
+    }
+
+    #[test]
+    fn record_summary_includes_capture_quality_metrics() {
+        let observations = vec![
+            Observation {
+                method: "GET".to_string(),
+                url: "https://example.com/api/items".to_string(),
+                path: "/api/items".to_string(),
+                query: Default::default(),
+                request_headers: Default::default(),
+                request_body: None,
+                response_status: Some(200),
+                response_headers: Default::default(),
+                response_body: Some(json!({"items":[{"id":1}]})),
+                warnings: vec![],
+            },
+            Observation {
+                method: "POST".to_string(),
+                url: "https://example.com/api/items".to_string(),
+                path: "/api/items".to_string(),
+                query: Default::default(),
+                request_headers: Default::default(),
+                request_body: Some(json!({"name":"Item"})),
+                response_status: Some(200),
+                response_headers: Default::default(),
+                response_body: None,
+                warnings: vec![],
+            },
+        ];
+        let summary = format_record_summary("fixture", &observations);
+
+        assert!(summary.contains("Capture quality:"));
+        assert!(summary.contains("API observations: 2"));
+        assert!(summary.contains("Response body coverage: 50%"));
+        assert!(summary.contains("Replayable tools (estimate): 1"));
+        assert!(summary.contains("Missing response bodies: 1"));
+        assert!(summary.contains("Recommended next action:"));
+    }
+
+    #[test]
     fn agent_task_trace_includes_write_tool_penalty_for_search_intent() {
         let mut write_tool = create_tool(false);
         write_tool.name = "create_clients.SearchResultsOption".to_string();
@@ -4258,6 +4312,7 @@ mod tests {
             drift_count: 0,
             cases: vec![BenchmarkCaseReport {
                 site: "fixture".to_string(),
+                capture_variant: Some("har".to_string()),
                 task: "Search for products".to_string(),
                 expected_outcome: "success".to_string(),
                 expected_tool: Some("list_items".to_string()),

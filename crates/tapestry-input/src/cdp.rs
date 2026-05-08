@@ -73,6 +73,72 @@ pub struct CaptureSummary {
     pub graphql_requests: usize,
 }
 
+impl CaptureSummary {
+    pub fn from_observations(observations: &[Observation]) -> Self {
+        Self {
+            total_observations: observations.len(),
+            candidate_api_observations: observations
+                .iter()
+                .filter(|obs| is_candidate_api_observation(obs))
+                .count(),
+            observations_with_response_bodies: observations
+                .iter()
+                .filter(|obs| obs.response_body.is_some())
+                .count(),
+            json_responses: observations
+                .iter()
+                .filter(|obs| has_json_signal(obs))
+                .count(),
+            graphql_requests: observations
+                .iter()
+                .filter(|obs| !graphql_operations(obs).is_empty())
+                .count(),
+        }
+    }
+
+    pub fn response_body_coverage(&self) -> f64 {
+        if self.total_observations == 0 {
+            0.0
+        } else {
+            self.observations_with_response_bodies as f64 / self.total_observations as f64
+        }
+    }
+
+    pub fn replayable_tool_hint(&self) -> usize {
+        self.candidate_api_observations
+            .min(self.observations_with_response_bodies)
+    }
+
+    pub fn quality_grade(&self) -> &'static str {
+        let coverage = self.response_body_coverage();
+        let score = coverage * 100.0
+            + (self.candidate_api_observations as f64 * 0.8)
+            + (self.json_responses as f64 * 0.5)
+            + (self.graphql_requests as f64 * 1.5);
+        if score >= 180.0 {
+            "A"
+        } else if score >= 120.0 {
+            "B"
+        } else if score >= 60.0 {
+            "C"
+        } else {
+            "D"
+        }
+    }
+
+    pub fn recommended_next_action(&self) -> &'static str {
+        if self.total_observations == 0 {
+            "record real app actions that trigger API traffic"
+        } else if self.observations_with_response_bodies == 0 {
+            "re-capture with response bodies included"
+        } else if self.response_body_coverage() < 0.5 {
+            "capture more response bodies before generating tools"
+        } else {
+            "good enough to generate"
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CdpObservationBuilder {
     options: CaptureOptions,
@@ -705,6 +771,39 @@ fn response_body_should_skip(mime_type: Option<&str>, path: &str) -> bool {
         || path.ends_with(".js")
 }
 
+pub(crate) fn is_candidate_api_observation(obs: &Observation) -> bool {
+    let path = obs.path.to_ascii_lowercase();
+    let method = obs.method.to_ascii_uppercase();
+    method != "GET"
+        || path.contains("api")
+        || path.contains("graphql")
+        || obs.request_body.is_some()
+}
+
+pub(crate) fn has_json_signal(obs: &Observation) -> bool {
+    obs.response_body.is_some()
+}
+
+pub(crate) fn graphql_operations(obs: &Observation) -> Vec<String> {
+    match &obs.request_body {
+        Some(Value::Object(body)) => body
+            .get("operationName")
+            .and_then(Value::as_str)
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| {
+                item.as_object()
+                    .and_then(|body| body.get("operationName"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 struct WsClient {
     stream: TcpStream,
     next_id: u64,
@@ -918,6 +1017,7 @@ fn is_timeout_error(error: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use base64::Engine;
+    use tapestry_core::Observation;
 
     #[test]
     fn mocked_cdp_events_become_observations() {
@@ -1156,5 +1256,44 @@ mod tests {
         let observations = builder.finalize();
 
         assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn capture_summary_scores_quality_and_guidance() {
+        let observations = vec![
+            Observation {
+                method: "GET".to_string(),
+                url: "https://example.com/api/items".to_string(),
+                path: "/api/items".to_string(),
+                query: BTreeMap::new(),
+                request_headers: BTreeMap::new(),
+                request_body: None,
+                response_status: Some(200),
+                response_headers: BTreeMap::new(),
+                response_body: Some(json!({"items":[{"id":1}]})),
+                warnings: Vec::new(),
+            },
+            Observation {
+                method: "POST".to_string(),
+                url: "https://example.com/api/items".to_string(),
+                path: "/api/items".to_string(),
+                query: BTreeMap::new(),
+                request_headers: BTreeMap::new(),
+                request_body: Some(json!({"name":"Item"})),
+                response_status: Some(200),
+                response_headers: BTreeMap::new(),
+                response_body: None,
+                warnings: Vec::new(),
+            },
+        ];
+        let summary = CaptureSummary::from_observations(&observations);
+
+        assert_eq!(summary.total_observations, 2);
+        assert_eq!(summary.candidate_api_observations, 2);
+        assert_eq!(summary.observations_with_response_bodies, 1);
+        assert_eq!(summary.json_responses, 1);
+        assert_eq!(summary.graphql_requests, 0);
+        assert!(matches!(summary.quality_grade(), "C" | "D"));
+        assert_eq!(summary.recommended_next_action(), "good enough to generate");
     }
 }
