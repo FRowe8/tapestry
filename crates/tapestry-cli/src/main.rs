@@ -4290,10 +4290,12 @@ mod tests {
             .map(|case| case.site.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(cases.len(), 9);
+        assert_eq!(cases.len(), 11);
         assert!(sites.contains(&"tesco"));
         assert!(sites.contains(&"next"));
+        assert!(sites.contains(&"next-cdp"));
         assert!(sites.contains(&"justkandy"));
+        assert!(sites.contains(&"justkandy-cdp"));
         assert!(sites.contains(&"melvor"));
         assert!(sites.contains(&"argos"));
         assert!(sites.contains(&"amazon"));
