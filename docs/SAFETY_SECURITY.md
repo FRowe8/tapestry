@@ -16,15 +16,25 @@ HAR files may contain:
 - Redact secrets from logs.
 - Do not persist raw HAR by default.
 - Store extracted observations separately from credentials.
-- Credentials stored with file permissions 0600.
+- Credentials and browser profiles readable only by the current user: mode 0600/0700 on Unix; on Windows an explicit ACL (inheritance removed, current user granted) via `icacls`, with a warning if restriction fails.
 - Provide secret cleanup commands.
 
 Commands:
 
 ```bash
 tapestry redact session.har
-tapestry purge acme --secrets
+tapestry purge acme --secrets   # removes credentials and the browser profile
 ```
+
+## Redaction coverage
+
+Secrets are stripped before any observation is persisted, on both the HAR and CDP capture paths:
+
+- request/response headers (Authorization, Cookie, Set-Cookie, CSRF and token headers)
+- JSON body fields (token, password, secret, api_key, and similar)
+- query string parameters (`?access_token=…`, `?sig=…`, `?api_key=…`) in both the parsed query map and the stored URL
+
+This is enforced by a test suite built on `examples/fixtures/redaction.har`, a capture seeded with sentinel secrets in every channel; tests assert no sentinel survives into observations, ToolSpecs, review/diagnose reports, or agent trace output. The one deliberate exception: `credentials from-har` and `reauth` extract secrets *into* the credentials store, which is the protected file above.
 
 ## Safety classification
 

@@ -64,9 +64,16 @@ Response:
 ```json
 {
   "status": "success",
-  "data": []
+  "data": [],
+  "execution": { "mode": "live" },
+  "conformance": {
+    "field_compatibility": 0.83,
+    "missing_fields": ["owner"]
+  }
 }
 ```
+
+`execution.mode` is `live` or `har_replay`. `conformance` is present on live calls when the inferred schema has fields to compare; `field_compatibility` below 0.8 marks the tool `degraded` in the site's health state (see below).
 
 ### get_evidence
 
@@ -117,3 +124,50 @@ Error types:
 - `endpoint_error`
 - `dependency_failed`
 - `approval_required`
+- `tool_not_found`
+- `site_not_specified` (MCP transport only)
+- `site_not_ready` (MCP transport only)
+
+## Approvals
+
+Approvals are stored per site in `approvals.json`, keyed by stable tool id:
+
+```json
+{
+  "tool_7f6f50a02b78": {
+    "fingerprint": "814ebecc248a55ea",
+    "approved_at": "2026-07-01T20:31:54Z",
+    "note": "reviewed evidence"
+  }
+}
+```
+
+The fingerprint hashes the tool's request shape (method, path, input schema). At load time the runtime overlays approvals onto the ToolSpec; an approval whose fingerprint no longer matches is stale and is not applied, and `generate` prunes stale entries. This lets `generate` be re-run freely without either losing valid approvals or silently carrying an approval over to a changed request.
+
+Execution policy enforced by `call_tool`:
+
+```text
+read + confidence >= threshold -> executable
+read + low confidence -> blocked unless approved
+write -> blocked unless approved
+unknown -> blocked unless approved
+```
+
+## Tool health
+
+Live executions update per-tool health in the site's `meta.json`:
+
+- `healthy` — 2xx and field compatibility >= 0.8
+- `degraded` — 2xx but the response drifted from the inferred schema
+- `broken` — endpoint errors (non-auth, non-rate-limit HTTP failures)
+- `unreachable` — network failures
+
+Auth failures (`auth_expired`) update site-level auth state instead of tool health: stale credentials say nothing about endpoint drift. Non-healthy states are attached as `health:*` warnings when the ToolSpec loads, so `tools search`, `review`, and MCP `search_tools` surface them without extra plumbing. Health never auto-disables a tool.
+
+## MCP transport
+
+`tapestry serve` exposes these four methods as MCP tools over stdio (newline-delimited JSON-RPC 2.0). Generated tools are never exposed individually; agents always discover them through `search_tools`, which keeps agent context constant regardless of tool count.
+
+- `--site <site>` binds the server to one site; otherwise each call takes a required `site` argument.
+- `--offline` / `--live` select HAR replay or live execution, matching `run`.
+- Structured runtime errors are returned verbatim as tool result content with `isError: true`, so agents can relay the remediation (`approval_required` -> `tapestry approve`, `auth_expired` -> refresh credentials) to the user instead of retrying.

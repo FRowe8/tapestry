@@ -1,6 +1,20 @@
-# HAR Capture Guide
+# Capture Guide
 
-Tapestry quality depends on HAR quality. A good HAR contains real API requests and their response bodies.
+Tapestry quality depends on capture quality. A good capture contains real API requests and their response bodies.
+
+## Live Recording (preferred)
+
+```bash
+tapestry record https://app.example.com --site acme
+```
+
+`record` launches a browser, attaches network capture *before* navigating (so the initial page load — usually the richest API traffic — is never missed), and also captures traffic from service workers, popups, and embedded frames. Each site gets a persistent browser profile: log in once and later `record` and `reauth` sessions start already authenticated. The profile contains session cookies, so `tapestry purge <site> --secrets` deletes it along with stored credentials; pass `--ephemeral-profile` for a throwaway session instead.
+
+Interact with the app while recording (search, open detail pages), then press Enter to finish. Repeated recordings merge into the site's existing observations.
+
+## HAR Import (alternative)
+
+If you prefer capturing in your own browser, export a HAR from DevTools and run `tapestry import <har> --site <site>`. The settings below matter.
 
 ## Required Settings
 
