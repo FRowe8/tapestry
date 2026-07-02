@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::{collections::BTreeSet, fs, path::Path, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::Path, time::Duration};
 use tapestry_core::{
     ResourceKind, RuntimeErrorResponse, SafetyClassification, ToolDefinition, ToolSpec,
 };
 use tracing::info;
 use url::Url;
 
-const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.70;
+pub const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.70;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
@@ -18,6 +18,8 @@ pub struct RuntimeOptions {
     pub offline_har_replay: bool,
     pub max_pages: usize,
     pub request_timeout_secs: u64,
+    /// HTTP headers injected into every outgoing request (e.g. Authorization, Cookie).
+    pub credentials: BTreeMap<String, String>,
 }
 
 impl Default for RuntimeOptions {
@@ -29,6 +31,7 @@ impl Default for RuntimeOptions {
             offline_har_replay: false,
             max_pages: 1,
             request_timeout_secs: 5,
+            credentials: BTreeMap::new(),
         }
     }
 }
@@ -41,6 +44,9 @@ pub struct SearchResult {
     pub safety: SafetyClassification,
     pub confidence: f64,
     pub score: usize,
+    /// Tool warnings agents should see before calling (e.g. health drift).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +87,133 @@ pub fn load_toolspec(path: impl AsRef<Path>) -> Result<ToolSpec> {
     Ok(serde_json::from_str(&raw).context("failed to parse ToolSpec")?)
 }
 
+pub fn load_credentials(path: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let raw = fs::read_to_string(path).context("failed to read credentials")?;
+    let map: BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(&raw).context("failed to parse credentials JSON")?;
+    Ok(map
+        .into_iter()
+        .filter_map(|(k, v)| {
+            v.get("value")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| (k, s.to_string()))
+        })
+        .collect())
+}
+
+/// One granted approval, stored per tool id in a site's `approvals.json`.
+///
+/// The fingerprint pins the approval to the request shape that was reviewed:
+/// if `generate` later produces a tool with the same id but a different
+/// method, path, or input schema, the approval no longer applies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub fingerprint: String,
+    pub approved_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Fingerprint of the request shape an approval covers.
+pub fn tool_fingerprint(tool: &ToolDefinition) -> String {
+    let shape = json!({
+        "method": tool.method,
+        "path": tool.path,
+        "input_schema": tool.input_schema,
+    });
+    let mut canonical = String::new();
+    write_canonical_json(&shape, &mut canonical);
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
+fn write_canonical_json(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String((*key).clone()).to_string());
+                out.push(':');
+                write_canonical_json(&map[*key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+pub fn load_approvals(path: impl AsRef<Path>) -> Result<BTreeMap<String, ApprovalRecord>> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let raw = fs::read_to_string(path).context("failed to read approvals")?;
+    Ok(serde_json::from_str(&raw).context("failed to parse approvals JSON")?)
+}
+
+/// Outcome of overlaying stored approvals onto a freshly loaded ToolSpec.
+#[derive(Debug, Clone, Default)]
+pub struct ApprovalOverlay {
+    /// Tool ids whose stored approval matched and was applied.
+    pub applied: Vec<String>,
+    /// Approvals whose tool changed shape since approval; not applied.
+    pub stale: Vec<String>,
+    /// Approvals whose tool id no longer exists in the ToolSpec.
+    pub orphaned: Vec<String>,
+}
+
+/// Set `approved = true` on tools with a matching, still-valid approval.
+///
+/// An approval is applied only when the stored fingerprint equals the tool's
+/// current fingerprint; otherwise it is reported as stale so callers can tell
+/// the user to re-review the tool.
+pub fn apply_approvals(
+    spec: &mut ToolSpec,
+    approvals: &BTreeMap<String, ApprovalRecord>,
+) -> ApprovalOverlay {
+    let mut overlay = ApprovalOverlay::default();
+    for (tool_id, record) in approvals {
+        let Some(tool) = spec.tools.iter_mut().find(|tool| tool.id == *tool_id) else {
+            overlay.orphaned.push(tool_id.clone());
+            continue;
+        };
+        if tool_fingerprint(tool) == record.fingerprint {
+            tool.approved = true;
+            overlay.applied.push(tool_id.clone());
+        } else {
+            overlay.stale.push(tool_id.clone());
+        }
+    }
+    overlay
+}
+
 pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchResult> {
     info!(
         target: "tapestry::runtime",
@@ -118,6 +251,12 @@ pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchRes
             safety: tool.safety.classification.clone(),
             confidence: tool.confidence.overall,
             score: score.max(0) as usize,
+            warnings: tool
+                .warnings
+                .iter()
+                .filter(|warning| warning.starts_with("health:"))
+                .cloned()
+                .collect(),
         })
         .collect()
 }
@@ -353,7 +492,7 @@ pub fn call_tool_dry_run(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Va
 }
 
 fn enforce_approval(tool: &ToolDefinition, tool_id: &str, threshold: f64) -> Option<Value> {
-    if tool.safety.classification == SafetyClassification::Unknown {
+    if tool.safety.classification == SafetyClassification::Unknown && !tool.approved {
         return Some(runtime_error(
             "approval_required",
             false,
@@ -645,7 +784,10 @@ fn execute_single_request(
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(options.request_timeout_secs))
         .build();
-    let req = agent.request(&request.method, url.as_str());
+    let mut req = agent.request(&request.method, url.as_str());
+    for (name, value) in &options.credentials {
+        req = req.set(name, value);
+    }
 
     let response = if let Some(body) = &request.body {
         req.set("content-type", "application/json")
@@ -684,10 +826,54 @@ fn handle_http_response(
             Some(status),
         ));
     }
-    Ok(json!({
+    let mut response = json!({
         "status": "success",
-        "data": data
-    }))
+        "data": data,
+        "execution": { "mode": "live" }
+    });
+    if let Some(conformance) = response_field_compatibility(&response["data"], &tool.response_schema)
+    {
+        response["conformance"] = json!({
+            "field_compatibility": conformance.compatibility,
+            "missing_fields": conformance.missing_fields,
+        });
+    }
+    Ok(response)
+}
+
+/// Field-level agreement between a live response and the inferred schema.
+#[derive(Debug, Clone)]
+pub struct FieldCompatibility {
+    /// Fraction of inferred top-level fields present in the response (0..=1).
+    pub compatibility: f64,
+    pub missing_fields: Vec<String>,
+}
+
+/// Compare a response's fields against the inferred response schema.
+///
+/// Returns `None` when the schema carries no field information to compare
+/// (opaque or empty schemas), so callers can distinguish "conforms" from
+/// "nothing to check". Arrays are checked via their first element, matching
+/// how the analyzer inferred the item schema.
+pub fn response_field_compatibility(data: &Value, schema: &Value) -> Option<FieldCompatibility> {
+    let (item_schema, item_data) = match schema.get("type").and_then(Value::as_str) {
+        Some("array") => (schema.get("items")?, data.as_array()?.first()?),
+        _ => (schema, data),
+    };
+    let properties = item_schema.get("properties").and_then(Value::as_object)?;
+    if properties.is_empty() {
+        return None;
+    }
+    let object = item_data.as_object()?;
+    let missing_fields: Vec<String> = properties
+        .keys()
+        .filter(|field| !object.contains_key(*field))
+        .cloned()
+        .collect();
+    Some(FieldCompatibility {
+        compatibility: 1.0 - missing_fields.len() as f64 / properties.len() as f64,
+        missing_fields,
+    })
 }
 
 fn handle_error_status(status: u16, body: Option<String>, tool: &ToolDefinition) -> Value {
@@ -695,7 +881,7 @@ fn handle_error_status(status: u16, body: Option<String>, tool: &ToolDefinition)
         401 | 403 => runtime_error(
             "auth_expired",
             false,
-            "Authentication expired or was rejected",
+            "Authentication expired or was rejected. Refresh stored credentials with `tapestry reauth <site>`.",
             json!({ "tool_id": tool.id }),
             Some("reauth_required"),
             Some(status),
@@ -710,10 +896,11 @@ fn handle_error_status(status: u16, body: Option<String>, tool: &ToolDefinition)
         ),
         _ => runtime_error(
             "endpoint_error",
-            false,
+            status >= 500,
             &format!("Endpoint returned HTTP {status}"),
             json!({
                 "tool_id": tool.id,
+                "status_code": status,
                 "body": body.unwrap_or_default().chars().take(200).collect::<String>()
             }),
             None,
@@ -866,7 +1053,7 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
         .to_ascii_lowercase();
     let warnings = tool.warnings.join(" ").to_ascii_lowercase();
     let resource_keywords = resource_search_keywords(&tool.resource_kind);
-    let mut raw_score: i32 = tokens
+    let term_match_score: i32 = tokens
         .iter()
         .map(|token| {
             if name.contains(token) {
@@ -894,6 +1081,8 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
         })
         .sum();
 
+    let mut raw_score = term_match_score;
+
     raw_score += intent_search_adjustment(tool, intent);
     if tool.resource_kind == ResourceKind::CommerceApi
         && has_resource_intent(tokens, &tool.resource_kind)
@@ -914,7 +1103,33 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
     {
         return raw_score / 8;
     }
+
+    // Penalise low-confidence tools so high-quality tools always rank above them
+    if tool.confidence.overall < 0.5 {
+        raw_score -= 30;
+    } else if tool.confidence.overall < 0.7 {
+        raw_score -= 10;
+    }
+
+    // Penalise framework-generated versioned paths (Next.js, Nuxt, etc.)
+    if is_framework_path(&tool.path) {
+        raw_score -= 40;
+    }
+
+    // A tool that matched at least one query term is always included (ranked last).
+    // Penalties demote rank but should not exclude genuinely relevant tools.
+    if term_match_score > 0 && raw_score <= 0 {
+        return 1;
+    }
+
     raw_score
+}
+
+fn is_framework_path(path: &str) -> bool {
+    path.contains("/_next/")
+        || path.contains("/_nuxt/")
+        || path.contains("/_app/")
+        || path.contains("/_astro/")
 }
 
 fn is_static_resource_kind(kind: &ResourceKind) -> bool {
@@ -989,10 +1204,14 @@ fn intent_search_adjustment(tool: &ToolDefinition, intent: TaskIntent) -> i32 {
         .and_then(|graphql| graphql.operation_type.as_deref())
         .map(|value| value.to_ascii_lowercase());
 
+    // Note: "list" is intentionally excluded — all GET non-detail tools are named list_*,
+    // so it would trivially match every tool and provide no discriminating signal.
+    // The Read safety boost (+20) and ApiAction boost (+8) already encode the preference for
+    // GET tools on SearchOrList intent. has_query_list_terms is for domain-specific terms only.
     let has_query_list_terms = contains_any_phrase(
         &text,
         &[
-            "search", "query", "list", "products", "flights", "holidays", "items",
+            "search", "query", "products", "flights", "holidays", "items",
         ],
     );
     let has_write_terms = contains_any_phrase(
@@ -1194,6 +1413,171 @@ mod tests {
     }
 
     #[test]
+    fn live_success_reports_field_compatibility_and_missing_fields() {
+        let server = MockServer::new(vec![MockResponse::ok(json!({"id": 7}))]);
+        let mut list = tool(
+            "list_items",
+            "GET",
+            "/api/items",
+            true,
+            SafetyClassification::Read,
+        );
+        list.response_schema = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer"},
+                "title": {"type": "string"},
+                "created_at": {"type": "string"},
+                "owner": {"type": "string"}
+            }
+        });
+        let spec = spec_with_base(&server.base_url(), vec![list]);
+
+        let response = call_tool_with_options(&spec, "list_items", json!({}), &live_options());
+
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["execution"]["mode"], "live");
+        assert_eq!(response["conformance"]["field_compatibility"], 0.25);
+        let missing = response["conformance"]["missing_fields"]
+            .as_array()
+            .expect("missing fields");
+        assert_eq!(missing.len(), 3);
+    }
+
+    #[test]
+    fn field_compatibility_checks_array_items_and_skips_opaque_schemas() {
+        let array_schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": { "id": {}, "name": {} }
+            }
+        });
+        let full = response_field_compatibility(&json!([{"id":1,"name":"a"}]), &array_schema)
+            .expect("comparable");
+        assert_eq!(full.compatibility, 1.0);
+
+        let half = response_field_compatibility(&json!([{"id":1}]), &array_schema)
+            .expect("comparable");
+        assert_eq!(half.compatibility, 0.5);
+        assert_eq!(half.missing_fields, vec!["name".to_string()]);
+
+        assert!(response_field_compatibility(&json!({"a":1}), &json!({"type":"object"})).is_none());
+        assert!(response_field_compatibility(&json!([]), &array_schema).is_none());
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_ignores_key_order() {
+        let read = tool(
+            "list_items",
+            "GET",
+            "/api/items",
+            false,
+            SafetyClassification::Read,
+        );
+        let mut reordered = read.clone();
+        reordered.input_schema = json!({
+            "required": read.input_schema["required"],
+            "properties": read.input_schema["properties"],
+            "type": "object"
+        });
+        assert_eq!(tool_fingerprint(&read), tool_fingerprint(&reordered));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_request_shape_changes() {
+        let base = tool(
+            "create_item",
+            "POST",
+            "/api/items",
+            false,
+            SafetyClassification::Write,
+        );
+        let mut method_changed = base.clone();
+        method_changed.method = "PUT".to_string();
+        let mut path_changed = base.clone();
+        path_changed.path = "/api/v2/items".to_string();
+        let mut schema_changed = base.clone();
+        schema_changed.input_schema = json!({"type":"object","properties":{}});
+        let mut cosmetic_changed = base.clone();
+        cosmetic_changed.description = "different description".to_string();
+
+        assert_ne!(tool_fingerprint(&base), tool_fingerprint(&method_changed));
+        assert_ne!(tool_fingerprint(&base), tool_fingerprint(&path_changed));
+        assert_ne!(tool_fingerprint(&base), tool_fingerprint(&schema_changed));
+        assert_eq!(tool_fingerprint(&base), tool_fingerprint(&cosmetic_changed));
+    }
+
+    #[test]
+    fn apply_approvals_sets_approved_on_fingerprint_match() {
+        let create = tool(
+            "create_item",
+            "POST",
+            "/api/items",
+            false,
+            SafetyClassification::Write,
+        );
+        let fingerprint = tool_fingerprint(&create);
+        let mut spec = spec_with_base("http://127.0.0.1:1", vec![create]);
+        let approvals: BTreeMap<String, ApprovalRecord> = [(
+            "create_item".to_string(),
+            ApprovalRecord {
+                fingerprint,
+                approved_at: "2026-07-01T00:00:00Z".to_string(),
+                note: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let overlay = apply_approvals(&mut spec, &approvals);
+
+        assert!(spec.tools[0].approved);
+        assert_eq!(overlay.applied, vec!["create_item".to_string()]);
+        assert!(overlay.stale.is_empty());
+        assert!(overlay.orphaned.is_empty());
+    }
+
+    #[test]
+    fn apply_approvals_skips_stale_and_orphaned_entries() {
+        let create = tool(
+            "create_item",
+            "POST",
+            "/api/items",
+            false,
+            SafetyClassification::Write,
+        );
+        let mut spec = spec_with_base("http://127.0.0.1:1", vec![create]);
+        let approvals: BTreeMap<String, ApprovalRecord> = [
+            (
+                "create_item".to_string(),
+                ApprovalRecord {
+                    fingerprint: "0000000000000000".to_string(),
+                    approved_at: "2026-07-01T00:00:00Z".to_string(),
+                    note: None,
+                },
+            ),
+            (
+                "removed_tool".to_string(),
+                ApprovalRecord {
+                    fingerprint: "0000000000000000".to_string(),
+                    approved_at: "2026-07-01T00:00:00Z".to_string(),
+                    note: None,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let overlay = apply_approvals(&mut spec, &approvals);
+
+        assert!(!spec.tools[0].approved);
+        assert!(overlay.applied.is_empty());
+        assert_eq!(overlay.stale, vec!["create_item".to_string()]);
+        assert_eq!(overlay.orphaned, vec!["removed_tool".to_string()]);
+    }
+
+    #[test]
     fn write_tool_is_blocked_until_approved() {
         let mut create = tool(
             "create_item",
@@ -1240,7 +1624,7 @@ mod tests {
                 "unknown",
                 "TRACE",
                 "/api/items",
-                true,
+                false,
                 SafetyClassification::Unknown,
             )],
         );
@@ -1248,6 +1632,27 @@ mod tests {
         let response = call_tool_with_options(&spec, "unknown", json!({}), &live_options());
 
         assert_eq!(response["error_type"], "approval_required");
+    }
+
+    #[test]
+    fn approved_unknown_safety_tool_is_allowed_to_execute() {
+        // Per the execution policy: unknown -> blocked *unless approved*.
+        let spec = spec_with_base(
+            "http://127.0.0.1:1",
+            vec![tool(
+                "unknown",
+                "TRACE",
+                "/api/items",
+                true,
+                SafetyClassification::Unknown,
+            )],
+        );
+
+        let response = call_tool_with_options(&spec, "unknown", json!({}), &live_options());
+
+        // Execution proceeds past the approval gate and fails only on the
+        // unreachable test endpoint.
+        assert_eq!(response["error_type"], "network_error");
     }
 
     #[test]
