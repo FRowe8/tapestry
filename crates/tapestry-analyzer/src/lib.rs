@@ -368,6 +368,12 @@ fn is_config_resource_path(path: &str) -> bool {
         || filename == "manifest.json"
         || filename == "config.json"
         || filename == "settings.json"
+        || filename.ends_with("-manifest.json")
+        || filename.ends_with(".webmanifest")
+        || filename == "browserconfig.xml"
+        || filename == "robots.txt"
+        || filename == "sitemap.xml"
+        || filename == "favicon.ico"
 }
 
 fn is_static_json_resource_path(path: &str) -> bool {
@@ -425,8 +431,56 @@ struct SignalDecision {
     reason: String,
 }
 
+const KNOWN_NOISE_HOSTS: &[&str] = &[
+    "maps.googleapis.com",
+    "maps.google.com",
+    "api.segment.io",
+    "cdn.segment.com",
+    "browser.sentry-dsn.com",
+    "o1.ingest.sentry.io",
+    "rum.datadoghq.com",
+    "api.datadoghq.com",
+    "analytics.google.com",
+    "www.google-analytics.com",
+    "www.googletagmanager.com",
+    "px.ads.linkedin.com",
+    "bat.bing.com",
+    "connect.facebook.net",
+    "www.facebook.com",
+    "cdn.cookielaw.org",
+    "geolocation.onetrust.com",
+    "cdn.onetrust.com",
+    "widget.trustpilot.com",
+    "api.rollbar.com",
+    "api.bugsnag.com",
+    "app.launchdarkly.com",
+    "events.launchdarkly.com",
+    "app.split.io",
+    "sdk.split.io",
+    "amplitude.com",
+    "api.amplitude.com",
+    "api2.amplitude.com",
+    "api.mixpanel.com",
+    "api.intercom.io",
+    "nexus-websocket-a.intercom.io",
+];
+
 fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) -> SignalDecision {
     let path = obs.path.to_ascii_lowercase();
+
+    // Block known third-party analytics, telemetry, and tracking hosts unconditionally
+    let host = url::Url::parse(&obs.url)
+        .ok()
+        .and_then(|url| url.host_str().map(|h| h.to_ascii_lowercase()));
+    if let Some(h) = host.as_deref() {
+        if KNOWN_NOISE_HOSTS.iter().any(|noise| *noise == h || h.ends_with(&format!(".{noise}"))) {
+            return SignalDecision {
+                keep: false,
+                score: -100,
+                reason: format!("known_noise_host:{h}"),
+            };
+        }
+    }
 
     if is_consent_or_config_asset(obs, &path) {
         return SignalDecision {
@@ -460,17 +514,24 @@ fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) ->
         };
     }
 
-    let host = url::Url::parse(&obs.url)
-        .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned));
-    if let (Some(primary), Some(host)) = (primary_host, host.as_deref()) {
-        if host != primary && !has_json_signal(obs) && !is_api_path(&path) {
+    if let (Some(primary), Some(h)) = (primary_host, host.as_deref()) {
+        if h != primary && !has_json_signal(obs) && !is_api_path(&path) {
             return SignalDecision {
                 keep: false,
                 score: -70,
-                reason: format!("third_party_non_api:{host}"),
+                reason: format!("third_party_non_api:{h}"),
             };
         }
+    }
+
+    // Penalise paths whose segments look like build hashes or encoded payloads.
+    // Use the original path (not lowercased) — case-mix is part of the detection signal.
+    if path_has_build_hash(&obs.path) {
+        return SignalDecision {
+            keep: false,
+            score: -85,
+            reason: "build_hash_path".to_string(),
+        };
     }
 
     let mut score = 0;
@@ -1800,9 +1861,50 @@ fn typed_value(seg: &str) -> Option<Value> {
         Some(Value::String(seg.to_string()))
     } else if let Ok(i) = seg.parse::<i64>() {
         Some(Value::from(i))
+    } else if looks_float_id(seg) {
+        Some(Value::from(seg.parse::<f64>().unwrap()))
     } else {
         None
     }
+}
+
+/// Matches floating-point path segments like coordinates: `-4.308857`, `50.376705`.
+/// Requires a decimal point to avoid matching plain integers twice.
+fn looks_float_id(seg: &str) -> bool {
+    seg.contains('.') && seg.parse::<f64>().is_ok()
+}
+
+fn path_has_build_hash(path: &str) -> bool {
+    path.split('/').any(|seg| is_gibberish_path_segment(seg))
+}
+
+fn is_gibberish_path_segment(seg: &str) -> bool {
+    if seg.is_empty() {
+        return false;
+    }
+    // Pure hex hash (webpack chunk IDs, content hashes)
+    if seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // URL-percent-encoded payload baked into a path segment
+    if seg.contains('%') && seg.len() >= 16 {
+        return true;
+    }
+    // Base64url-encoded payload: long, mixed-case alphanumeric + '-'/'_'/'='
+    // Requires both cases + digits to distinguish from regular slugs like "web-unified-search"
+    if seg.len() >= 24 {
+        let is_base64url = seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '='));
+        if is_base64url {
+            let upper = seg.chars().filter(|c| c.is_ascii_uppercase()).count();
+            let lower = seg.chars().filter(|c| c.is_ascii_lowercase()).count();
+            let digits = seg.chars().filter(|c| c.is_ascii_digit()).count();
+            // True base64url tokens always have a dense mix of upper, lower, and digits
+            return upper >= 3 && lower >= 3 && digits >= 2;
+        }
+    }
+    false
 }
 
 fn value_from_path_segment(seg: &str) -> Value {
