@@ -5,6 +5,8 @@ use serde_json::{json, Map, Value};
 use std::{fs, path::PathBuf};
 use tracing::info;
 
+mod mcp;
+
 #[derive(Parser)]
 #[command(name = "tapestry")]
 #[command(about = "Turn captured web app traffic into low-token agent tools")]
@@ -30,6 +32,11 @@ enum Command {
             help = "Local site name used for generated observations and tools"
         )]
         site: String,
+        #[arg(
+            long,
+            help = "Replace existing observations instead of merging into them"
+        )]
+        replace: bool,
     },
     #[command(
         about = "Record network traffic from a browser session using CDP",
@@ -61,6 +68,27 @@ enum Command {
         output_observations: bool,
         #[arg(long, help = "Keep the temporary browser profile directory")]
         keep_profile: bool,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Minimum number of candidate API observations required before failing"
+        )]
+        min_api_observations: usize,
+        #[arg(
+            long,
+            help = "Allow low-signal captures to be saved instead of exiting non-zero"
+        )]
+        allow_low_signal: bool,
+        #[arg(
+            long,
+            help = "Replace existing observations instead of merging into them"
+        )]
+        replace: bool,
+        #[arg(
+            long,
+            help = "Use a throwaway browser profile instead of the site's persistent one"
+        )]
+        ephemeral_profile: bool,
     },
     #[command(
         about = "Generate a ToolSpec from imported observations",
@@ -177,6 +205,76 @@ enum Command {
         format: ReviewFormat,
     },
     #[command(
+        about = "Manage stored credentials for a site",
+        after_help = "Examples:\n  tapestry credentials demo list\n  tapestry credentials demo set Authorization \"Bearer eyJ...\"\n  tapestry credentials demo set Cookie \"session=abc\"\n  tapestry credentials demo from-har capture.har\n  tapestry credentials demo purge"
+    )]
+    Credentials {
+        site: String,
+        #[command(subcommand)]
+        command: CredentialsCommand,
+    },
+    #[command(
+        about = "Approve tools that are blocked pending review, or list approval status",
+        after_help = "Examples:\n  tapestry approve demo --list\n  tapestry approve demo create_items\n  tapestry approve demo create_items --note \"reviewed evidence, safe test env\"\n  tapestry approve demo create_items --revoke"
+    )]
+    Approve {
+        #[arg(help = "Local site name with a generated ToolSpec")]
+        site: String,
+        #[arg(help = "Tool id or name to approve (omit to list approval status)")]
+        tool_id: Option<String>,
+        #[arg(long, help = "List approval status for all tools")]
+        list: bool,
+        #[arg(long, help = "Revoke a previously granted approval")]
+        revoke: bool,
+        #[arg(long, help = "Optional note stored with the approval")]
+        note: Option<String>,
+    },
+    #[command(
+        about = "Refresh stored credentials by logging in through a real browser",
+        after_help = "Examples:\n  tapestry reauth demo\n  tapestry reauth demo --url https://app.example.com/login\n\nA browser window opens; log in and perform one authenticated action, then press Enter in this terminal. Tapestry harvests the fresh auth headers from first-party traffic and updates the site's stored credentials. Your login keystrokes are never captured — only the resulting request headers."
+    )]
+    Reauth {
+        #[arg(help = "Local site name whose credentials should be refreshed")]
+        site: String,
+        #[arg(long, help = "Login URL to open (defaults to the site's base URL)")]
+        url: Option<String>,
+        #[arg(long, help = "Explicit browser executable path")]
+        browser: Option<PathBuf>,
+        #[arg(long, default_value_t = 300, help = "Timeout in seconds")]
+        timeout_secs: u64,
+        #[arg(
+            long,
+            help = "Use a throwaway browser profile instead of the site's persistent one"
+        )]
+        ephemeral_profile: bool,
+    },
+    #[command(
+        about = "Check the local environment and site data for common problems",
+        after_help = "Example:\n  tapestry doctor"
+    )]
+    Doctor,
+    #[command(
+        about = "Serve the native runtime as an MCP stdio server for agents",
+        after_help = "Examples:\n  tapestry serve --site demo\n  tapestry serve\n\nAdd to an MCP client config (e.g. .mcp.json):\n  {\n    \"mcpServers\": {\n      \"tapestry\": { \"command\": \"tapestry\", \"args\": [\"serve\", \"--site\", \"demo\"] }\n    }\n  }"
+    )]
+    Serve {
+        #[arg(
+            long,
+            help = "Default site for tool calls; without it, agents pass `site` per call"
+        )]
+        site: Option<String>,
+        #[arg(long, help = "Force live HTTP execution instead of HAR replay")]
+        live: bool,
+        #[arg(long, help = "Use captured HAR responses only; never call the network")]
+        offline: bool,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Maximum pages for simple runtime pagination"
+        )]
+        max_pages: usize,
+    },
+    #[command(
         about = "Call a generated tool directly through the native runtime",
         after_help = "Examples:\n  tapestry run demo list_items --args '{\"limit\":5}'\n  tapestry run demo list_items --args '{limit:5}'\n  tapestry run demo list_items --args '{\"limit\":5}' --live"
     )]
@@ -209,6 +307,31 @@ enum ToolsCommand {
     Evidence { site: String, tool_id: String },
 }
 
+#[derive(Debug, Subcommand)]
+enum CredentialsCommand {
+    #[command(about = "List stored credential header names (values are not shown)")]
+    List,
+    #[command(about = "Store a credential header value")]
+    Set {
+        #[arg(help = "HTTP header name, e.g. Authorization or Cookie")]
+        header: String,
+        #[arg(help = "Header value to store")]
+        value: String,
+    },
+    #[command(about = "Remove a stored credential header")]
+    Remove {
+        #[arg(help = "HTTP header name to remove")]
+        header: String,
+    },
+    #[command(about = "Remove all credentials for this site")]
+    Purge,
+    #[command(about = "Extract auth headers from a raw HAR file and store them")]
+    FromHar {
+        #[arg(help = "Path to the HAR file to extract credentials from")]
+        har: PathBuf,
+    },
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -216,24 +339,16 @@ fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Import { har, site } => {
+        Command::Import { har, site, replace } => {
             validate_site_name(&site)?;
             eprintln!(
                 "Warning: HAR files may contain credentials and personal data. Tapestry will persist redacted observations, not the raw HAR."
             );
             info!(command = "import", site, har = %har.display(), "starting HAR import");
             let observations = tapestry_input::import_har(&har)?;
-            let dir = site_dir(&site);
-            fs::create_dir_all(&dir)?;
-            write_protected(
-                &dir.join("observations.json"),
-                &serde_json::to_string_pretty(&observations)?,
-            )?;
-            println!(
-                "Imported {} observations for site '{}'",
-                observations.len(),
-                site
-            );
+            let source = format!("har:{}", har.display());
+            let outcome = store_capture(&site, &source, observations, replace)?;
+            println!("{}", format_capture_message(&site, &outcome, "Imported"));
         }
         Command::Record {
             url,
@@ -245,6 +360,10 @@ fn main() -> Result<()> {
             include_third_party,
             output_observations,
             keep_profile,
+            min_api_observations,
+            allow_low_signal,
+            replace,
+            ephemeral_profile,
         } => {
             validate_site_name(&site)?;
             info!(command = "record", site, url = %url, "starting CDP capture");
@@ -259,19 +378,32 @@ fn main() -> Result<()> {
                     include_third_party,
                     output_observations,
                     keep_profile,
+                    profile_dir: site_profile_dir(&site, ephemeral_profile),
                 },
             )?;
             let observations = record.observations;
-            let dir = site_dir(&site);
-            fs::create_dir_all(&dir)?;
-            write_protected(
-                &dir.join("observations.json"),
-                &serde_json::to_string_pretty(&observations)?,
-            )?;
-            if output_observations {
-                println!("{}", serde_json::to_string_pretty(&observations)?);
+            let summary = tapestry_input::CaptureSummary::from_observations(&observations);
+            let warnings = summary.capture_warnings();
+            for warning in &warnings {
+                eprintln!("Warning: {warning}");
             }
-            println!("{}", format_record_summary(&site, &observations));
+            let session_observations = observations.clone();
+            let outcome = store_capture(&site, &format!("cdp:{url}"), observations, replace)?;
+            if output_observations {
+                println!("{}", serde_json::to_string_pretty(&session_observations)?);
+            }
+            if outcome.merged_into_existing {
+                println!("{}", format_capture_message(&site, &outcome, "Recorded"));
+            }
+            println!("{}", format_record_summary(&site, &session_observations));
+            if let Some(message) =
+                record_low_signal_failure(&summary, min_api_observations, allow_low_signal)
+            {
+                anyhow::bail!(
+                    "{} Use --allow-low-signal to save this capture anyway.",
+                    message
+                );
+            }
         }
         Command::Generate { site } => {
             validate_site_name(&site)?;
@@ -286,6 +418,7 @@ fn main() -> Result<()> {
                 &serde_json::to_string_pretty(&spec)?,
             )?;
             println!("Generated {} tools for site '{}'", spec.tools.len(), site);
+            prune_stale_approvals(&site, &spec)?;
         }
         Command::Redact { har } => {
             info!(command = "redact", har = %har.display(), "redacting HAR");
@@ -314,10 +447,22 @@ fn main() -> Result<()> {
             } else {
                 let mut purged = false;
                 if secrets {
+                    let mut removed_any = false;
                     let credentials = dir.join("credentials.json");
                     if credentials.exists() {
                         fs::remove_file(&credentials)?;
-                        println!("Purged secrets for site '{}'", site);
+                        removed_any = true;
+                    }
+                    let profile = dir.join("browser-profile");
+                    if profile.exists() {
+                        fs::remove_dir_all(&profile)?;
+                        removed_any = true;
+                    }
+                    if removed_any {
+                        println!(
+                            "Purged secrets for site '{}' (credentials and browser profile)",
+                            site
+                        );
                         purged = true;
                     } else {
                         println!("No secrets found for site '{}'", site);
@@ -327,6 +472,11 @@ fn main() -> Result<()> {
                     let obs_path = dir.join("observations.json");
                     if obs_path.exists() {
                         fs::remove_file(&obs_path)?;
+                        let mut meta = load_site_meta(&site);
+                        if !meta.capture_sessions.is_empty() {
+                            meta.capture_sessions.clear();
+                            save_site_meta(&site, &meta)?;
+                        }
                         println!("Purged observations for site '{}'", site);
                         purged = true;
                     } else {
@@ -374,7 +524,8 @@ fn main() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let options = runtime_options_for(&spec, max_pages, live, offline);
+            let mut options = runtime_options_for(&spec, max_pages, live, offline);
+            options.credentials = load_site_credentials(&site)?;
             let out = run_agent_task(&spec, &observations, &task, trace, &options);
             println!("{out}");
         }
@@ -427,6 +578,229 @@ fn main() -> Result<()> {
                 ReviewFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
             }
         }
+        Command::Credentials { site, command } => {
+            validate_site_name(&site)?;
+            let dir = site_dir(&site);
+            fs::create_dir_all(&dir)?;
+            let creds_path = dir.join("credentials.json");
+            match command {
+                CredentialsCommand::List => {
+                    let creds = load_credentials_raw(&creds_path)?;
+                    if creds.is_empty() {
+                        println!("No credentials stored for site '{}'.", site);
+                    } else {
+                        println!("Stored credentials for site '{}':", site);
+                        for (name, entry) in &creds {
+                            let captured_at = entry
+                                .get("captured_at")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            println!("  {name}  (captured {captured_at})");
+                        }
+                    }
+                }
+                CredentialsCommand::Set { header, value } => {
+                    let mut creds = load_credentials_raw(&creds_path)?;
+                    creds.insert(
+                        header.clone(),
+                        json!({
+                            "value": value,
+                            "captured_at": current_timestamp_cli()
+                        }),
+                    );
+                    write_secret(
+                        &creds_path,
+                        &serde_json::to_string_pretty(&creds)?,
+                    )?;
+                    println!("Stored credential '{header}' for site '{site}'.");
+                }
+                CredentialsCommand::Remove { header } => {
+                    let mut creds = load_credentials_raw(&creds_path)?;
+                    if creds.remove(&header).is_some() {
+                        write_secret(
+                            &creds_path,
+                            &serde_json::to_string_pretty(&creds)?,
+                        )?;
+                        println!("Removed credential '{header}' for site '{site}'.");
+                    } else {
+                        println!("No credential '{header}' found for site '{site}'.");
+                    }
+                }
+                CredentialsCommand::Purge => {
+                    if creds_path.exists() {
+                        fs::remove_file(&creds_path)?;
+                        println!("Purged all credentials for site '{site}'.");
+                    } else {
+                        println!("No credentials found for site '{site}'.");
+                    }
+                }
+                CredentialsCommand::FromHar { har } => {
+                    let raw = fs::read_to_string(&har)
+                        .context("failed to read HAR file")?;
+                    let json: Value = serde_json::from_str(&raw)
+                        .context("failed to parse HAR JSON")?;
+                    let entries = json
+                        .get("log")
+                        .and_then(|v| v.get("entries"))
+                        .and_then(|v| v.as_array())
+                        .context("HAR missing log.entries")?;
+
+                    let secret_headers = [
+                        "authorization",
+                        "cookie",
+                        "x-api-key",
+                        "x-auth-token",
+                        "x-access-token",
+                        "x-session-token",
+                    ];
+                    let mut extracted: std::collections::BTreeMap<String, Value> =
+                        std::collections::BTreeMap::new();
+                    for entry in entries {
+                        if let Some(headers) = entry
+                            .get("request")
+                            .and_then(|r| r.get("headers"))
+                            .and_then(|h| h.as_array())
+                        {
+                            for h in headers {
+                                let name = h
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                let value = h
+                                    .get("value")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if secret_headers.contains(&name.to_ascii_lowercase().as_str())
+                                    && !value.is_empty()
+                                    && !extracted.contains_key(&name)
+                                {
+                                    extracted.insert(
+                                        name,
+                                        json!({
+                                            "value": value,
+                                            "captured_at": current_timestamp_cli()
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if extracted.is_empty() {
+                        println!("No auth headers found in HAR.");
+                    } else {
+                        let mut existing = load_credentials_raw(&creds_path)?;
+                        for (name, entry) in &extracted {
+                            existing.insert(name.clone(), entry.clone());
+                        }
+                        write_secret(
+                            &creds_path,
+                            &serde_json::to_string_pretty(&existing)?,
+                        )?;
+                        println!(
+                            "Extracted {} credential(s) from HAR for site '{site}':",
+                            extracted.len()
+                        );
+                        for name in extracted.keys() {
+                            println!("  {name}");
+                        }
+                    }
+                }
+            }
+        }
+        Command::Reauth {
+            site,
+            url,
+            browser,
+            timeout_secs,
+            ephemeral_profile,
+        } => {
+            validate_site_name(&site)?;
+            let target_url = match url {
+                Some(url) => url,
+                None => load_site_spec(&site)
+                    .ok()
+                    .and_then(|spec| spec.site.base_url)
+                    .context(
+                        "site has no base URL; pass the login page with --url <url>",
+                    )?,
+            };
+            info!(command = "reauth", site, url = %target_url, "starting credential refresh");
+            eprintln!(
+                "A browser window will open at {target_url}.\n\
+                 1. Log in as usual.\n\
+                 2. Perform one authenticated action (open a list, view a record).\n\
+                 3. Press Enter here to finish.\n\
+                 Tapestry only harvests the resulting auth headers; keystrokes are not captured."
+            );
+            let harvested = tapestry_input::reauth(
+                &target_url,
+                &tapestry_input::ReauthOptions {
+                    browser,
+                    timeout_secs,
+                    profile_dir: site_profile_dir(&site, ephemeral_profile),
+                },
+            )?;
+            if harvested.is_empty() {
+                anyhow::bail!(
+                    "No credential headers were observed. Make sure you logged in and triggered at least one API request, then try again."
+                );
+            }
+            let dir = site_dir(&site);
+            fs::create_dir_all(&dir)?;
+            let creds_path = dir.join("credentials.json");
+            let mut creds = load_credentials_raw(&creds_path)?;
+            let mut names: Vec<String> = Vec::new();
+            for (name, value) in harvested {
+                creds.insert(
+                    name.clone(),
+                    json!({
+                        "value": value,
+                        "captured_at": current_timestamp_cli()
+                    }),
+                );
+                names.push(name);
+            }
+            write_secret(&creds_path, &serde_json::to_string_pretty(&creds)?)?;
+            println!(
+                "Refreshed {} credential header(s) for site '{}': {}",
+                names.len(),
+                site,
+                names.join(", ")
+            );
+        }
+        Command::Approve {
+            site,
+            tool_id,
+            list,
+            revoke,
+            note,
+        } => {
+            validate_site_name(&site)?;
+            run_approve(&site, tool_id.as_deref(), list, revoke, note)?;
+        }
+        Command::Doctor => {
+            println!("{}", run_doctor());
+        }
+        Command::Serve {
+            site,
+            live,
+            offline,
+            max_pages,
+        } => {
+            if let Some(site) = &site {
+                validate_site_name(site)?;
+            }
+            info!(command = "serve", site = ?site, "starting MCP stdio server");
+            mcp::serve(mcp::McpServerConfig {
+                default_site: site,
+                live,
+                offline,
+                max_pages,
+            })?;
+        }
         Command::Run {
             site,
             tool_id,
@@ -438,13 +812,620 @@ fn main() -> Result<()> {
             validate_site_name(&site)?;
             let spec = load_site_spec(&site)?;
             let args_json = parse_args(&args)?;
-            let options = runtime_options_for(&spec, max_pages, live, offline);
+            let mut options = runtime_options_for(&spec, max_pages, live, offline);
+            options.credentials = load_site_credentials(&site)?;
             let out =
                 tapestry_runtime::call_tool_with_options(&spec, &tool_id, args_json, &options);
+            record_tool_health(&site, &spec, &tool_id, &out);
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
     }
     Ok(())
+}
+
+fn run_approve(
+    site: &str,
+    tool_id: Option<&str>,
+    list: bool,
+    revoke: bool,
+    note: Option<String>,
+) -> Result<()> {
+    let approvals_path = site_dir(site).join("approvals.json");
+    let spec = load_site_spec(site)?;
+    let mut approvals = tapestry_runtime::load_approvals(&approvals_path)?;
+
+    if list || tool_id.is_none() {
+        if revoke {
+            anyhow::bail!("--revoke requires a tool id: tapestry approve {site} <tool_id> --revoke");
+        }
+        println!("{}", format_approval_status(site, &spec, &approvals));
+        return Ok(());
+    }
+
+    let tool_id = tool_id.expect("checked above");
+    let Some(tool) = spec
+        .tools
+        .iter()
+        .find(|tool| tool.id == tool_id || tool.name == tool_id)
+    else {
+        anyhow::bail!(
+            "Tool '{}' not found for site '{}'. Run `tapestry approve {} --list` to see tools.",
+            tool_id,
+            site,
+            site
+        );
+    };
+
+    if revoke {
+        if approvals.remove(&tool.id).is_some() {
+            write_protected(&approvals_path, &serde_json::to_string_pretty(&approvals)?)?;
+            println!("Revoked approval for '{}' on site '{}'.", tool.id, site);
+        } else {
+            println!("No stored approval for '{}' on site '{}'.", tool.id, site);
+        }
+        return Ok(());
+    }
+
+    let required = approval_requirement(tool);
+    approvals.insert(
+        tool.id.clone(),
+        tapestry_runtime::ApprovalRecord {
+            fingerprint: tapestry_runtime::tool_fingerprint(tool),
+            approved_at: current_timestamp_cli(),
+            note,
+        },
+    );
+    write_protected(&approvals_path, &serde_json::to_string_pretty(&approvals)?)?;
+    println!(
+        "Approved '{}' ({} {}, safety {}, confidence {:.2}) for site '{}'.",
+        tool.id,
+        tool.method,
+        tool.path,
+        safety_label(&tool.safety.classification),
+        tool.confidence.overall,
+        site
+    );
+    if required.is_none() {
+        println!("Note: this tool is read-safe above the confidence threshold and did not require approval.");
+    }
+    println!("The approval is pinned to the tool's current request shape; if `generate` changes the tool, re-approve it.");
+    Ok(())
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SiteMeta {
+    #[serde(default)]
+    tool_health: std::collections::BTreeMap<String, ToolHealth>,
+    #[serde(default)]
+    auth: AuthMeta,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    capture_sessions: Vec<CaptureSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CaptureSession {
+    source: String,
+    imported_at: String,
+    observations: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ToolHealth {
+    /// healthy | degraded | broken | unreachable
+    status: String,
+    last_checked: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    field_compatibility: Option<f64>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AuthMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_auth_failure: Option<String>,
+}
+
+fn load_site_meta(site: &str) -> SiteMeta {
+    let path = site_dir(site).join("meta.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_site_meta(site: &str, meta: &SiteMeta) -> Result<()> {
+    let dir = site_dir(site);
+    fs::create_dir_all(&dir)?;
+    write_protected(&dir.join("meta.json"), &serde_json::to_string_pretty(meta)?)
+}
+
+/// Record per-tool health from a live execution result.
+///
+/// Replay and dry-run results carry no drift signal and are ignored. Auth
+/// failures update site-level auth state rather than tool health: stale
+/// credentials say nothing about whether the endpoint drifted. Failures to
+/// persist are reported but never fail the call itself.
+fn record_tool_health(site: &str, spec: &tapestry_core::ToolSpec, tool_id: &str, response: &Value) {
+    let mode = response
+        .pointer("/execution/mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if mode == "har_replay" || response["status"] == "dry_run" {
+        return;
+    }
+    let Some(tool) = spec
+        .tools
+        .iter()
+        .find(|tool| tool.id == tool_id || tool.name == tool_id)
+    else {
+        return;
+    };
+
+    let now = current_timestamp_cli();
+    let mut meta = load_site_meta(site);
+    let previous_success = meta
+        .tool_health
+        .get(&tool.id)
+        .and_then(|health| health.last_success.clone());
+    let update = classify_tool_health(response, mode, &now, previous_success);
+
+    if update.auth_success {
+        meta.auth.last_success = Some(now.clone());
+    }
+    if update.auth_failure {
+        meta.auth.last_auth_failure = Some(now);
+    }
+    if let Some(health) = update.tool_health {
+        meta.tool_health.insert(tool.id.clone(), health);
+    } else if !update.auth_success && !update.auth_failure {
+        return;
+    }
+    if let Err(error) = save_site_meta(site, &meta) {
+        eprintln!("Warning: failed to persist tool health for site '{site}': {error}");
+    }
+}
+
+/// Outcome of merging a new capture into a site's stored observations.
+struct MergeOutcome {
+    observations: Vec<tapestry_core::Observation>,
+    added: usize,
+    duplicates: usize,
+    merged_into_existing: bool,
+}
+
+/// Append new observations to the stored ones, skipping exact duplicates.
+///
+/// Multiple sessions of the same app legitimately repeat requests; identical
+/// request/response pairs add no evidence, but the same endpoint with a
+/// different response is new evidence and is kept.
+fn merge_observations(
+    existing: Vec<tapestry_core::Observation>,
+    incoming: Vec<tapestry_core::Observation>,
+) -> MergeOutcome {
+    let merged_into_existing = !existing.is_empty();
+    let mut seen: std::collections::BTreeSet<String> =
+        existing.iter().map(observation_key).collect();
+    let mut observations = existing;
+    let mut added = 0;
+    let mut duplicates = 0;
+    for observation in incoming {
+        if seen.insert(observation_key(&observation)) {
+            observations.push(observation);
+            added += 1;
+        } else {
+            duplicates += 1;
+        }
+    }
+    MergeOutcome {
+        observations,
+        added,
+        duplicates,
+        merged_into_existing,
+    }
+}
+
+fn observation_key(observation: &tapestry_core::Observation) -> String {
+    serde_json::to_string(&json!({
+        "method": observation.method,
+        "url": observation.url,
+        "request_body": observation.request_body,
+        "response_status": observation.response_status,
+        "response_body": observation.response_body,
+    }))
+    .unwrap_or_default()
+}
+
+/// Load stored observations for merging; a missing file is an empty site.
+fn load_existing_observations(site: &str) -> Vec<tapestry_core::Observation> {
+    fs::read_to_string(site_dir(site).join("observations.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Persist a capture: merge (or replace), write observations, track the session.
+fn store_capture(
+    site: &str,
+    source: &str,
+    incoming: Vec<tapestry_core::Observation>,
+    replace: bool,
+) -> Result<MergeOutcome> {
+    let incoming_count = incoming.len();
+    let existing = if replace {
+        Vec::new()
+    } else {
+        load_existing_observations(site)
+    };
+    let outcome = merge_observations(existing, incoming);
+    let dir = site_dir(site);
+    fs::create_dir_all(&dir)?;
+    write_protected(
+        &dir.join("observations.json"),
+        &serde_json::to_string_pretty(&outcome.observations)?,
+    )?;
+    let mut meta = load_site_meta(site);
+    if replace {
+        meta.capture_sessions.clear();
+    }
+    meta.capture_sessions.push(CaptureSession {
+        source: source.to_string(),
+        imported_at: current_timestamp_cli(),
+        observations: incoming_count,
+    });
+    save_site_meta(site, &meta)?;
+    Ok(outcome)
+}
+
+fn format_capture_message(site: &str, outcome: &MergeOutcome, verb: &str) -> String {
+    if outcome.merged_into_existing {
+        format!(
+            "{verb} {} observation(s) for site '{}' ({} new, {} duplicate(s) skipped; {} total). Use --replace to start fresh.",
+            outcome.added + outcome.duplicates,
+            site,
+            outcome.added,
+            outcome.duplicates,
+            outcome.observations.len()
+        )
+    } else {
+        format!(
+            "{verb} {} observations for site '{}'",
+            outcome.observations.len(),
+            site
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct HealthUpdate {
+    tool_health: Option<ToolHealth>,
+    auth_success: bool,
+    auth_failure: bool,
+}
+
+fn classify_tool_health(
+    response: &Value,
+    mode: &str,
+    now: &str,
+    previous_success: Option<String>,
+) -> HealthUpdate {
+    let http_status = response
+        .get("http_status")
+        .and_then(Value::as_u64)
+        .map(|status| status as u16);
+
+    match response["status"].as_str() {
+        Some("success") if mode == "live" => {
+            let compatibility = response
+                .pointer("/conformance/field_compatibility")
+                .and_then(Value::as_f64);
+            let missing = response
+                .pointer("/conformance/missing_fields")
+                .and_then(Value::as_array)
+                .map(|fields| {
+                    fields
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let health = match compatibility {
+                Some(value) if value < 0.8 => ToolHealth {
+                    status: "degraded".to_string(),
+                    last_checked: now.to_string(),
+                    last_success: Some(now.to_string()),
+                    detail: Some(format!(
+                        "response matched {:.0}% of inferred fields; missing: {missing}",
+                        value * 100.0
+                    )),
+                    http_status: None,
+                    field_compatibility: Some(value),
+                },
+                other => ToolHealth {
+                    status: "healthy".to_string(),
+                    last_checked: now.to_string(),
+                    last_success: Some(now.to_string()),
+                    detail: None,
+                    http_status: None,
+                    field_compatibility: other,
+                },
+            };
+            HealthUpdate {
+                tool_health: Some(health),
+                auth_success: true,
+                auth_failure: false,
+            }
+        }
+        Some("error") => match response["error_type"].as_str() {
+            Some("auth_expired") => HealthUpdate {
+                tool_health: None,
+                auth_success: false,
+                auth_failure: true,
+            },
+            Some("schema_mismatch") if http_status.is_some() => HealthUpdate {
+                tool_health: Some(ToolHealth {
+                    status: "degraded".to_string(),
+                    last_checked: now.to_string(),
+                    last_success: previous_success,
+                    detail: Some(
+                        "live response no longer matches the inferred schema".to_string(),
+                    ),
+                    http_status,
+                    field_compatibility: None,
+                }),
+                ..HealthUpdate::default()
+            },
+            Some("endpoint_error") => HealthUpdate {
+                tool_health: Some(ToolHealth {
+                    status: "broken".to_string(),
+                    last_checked: now.to_string(),
+                    last_success: previous_success,
+                    detail: Some(format!(
+                        "endpoint returned HTTP {}",
+                        http_status.map(|s| s.to_string()).unwrap_or_default()
+                    )),
+                    http_status,
+                    field_compatibility: None,
+                }),
+                ..HealthUpdate::default()
+            },
+            Some("network_error") => HealthUpdate {
+                tool_health: Some(ToolHealth {
+                    status: "unreachable".to_string(),
+                    last_checked: now.to_string(),
+                    last_success: previous_success,
+                    detail: Some("network request failed".to_string()),
+                    http_status: None,
+                    field_compatibility: None,
+                }),
+                ..HealthUpdate::default()
+            },
+            _ => HealthUpdate::default(),
+        },
+        _ => HealthUpdate::default(),
+    }
+}
+
+/// Attach non-healthy health states as tool warnings so review, tools search,
+/// and MCP search_tools all surface drift without extra plumbing.
+fn apply_health_warnings(site: &str, spec: &mut tapestry_core::ToolSpec) {
+    let meta = load_site_meta(site);
+    if meta.tool_health.is_empty() {
+        return;
+    }
+    for tool in &mut spec.tools {
+        let Some(health) = meta.tool_health.get(&tool.id) else {
+            continue;
+        };
+        if health.status == "healthy" {
+            continue;
+        }
+        let detail = health.detail.clone().unwrap_or_default();
+        tool.warnings.push(format!(
+            "health:{} — {} (last checked {}). Re-capture and regenerate if this persists.",
+            health.status, detail, health.last_checked
+        ));
+    }
+}
+
+/// Environment and site-data checks for `tapestry doctor`.
+fn run_doctor() -> String {
+    let mut out = vec!["Tapestry doctor".to_string(), String::new()];
+
+    match tapestry_input::resolve_browser(None) {
+        Ok(path) => out.push(format!("[ok]   browser: {}", path.display())),
+        Err(error) => out.push(format!(
+            "[FAIL] browser: {error}\n       Live recording and reauth need Chrome/Chromium/Edge. HAR import still works."
+        )),
+    }
+
+    let root = sites_root();
+    match fs::create_dir_all(&root).and_then(|_| {
+        let probe = root.join(".doctor-probe");
+        fs::write(&probe, "probe")?;
+        fs::remove_file(&probe)
+    }) {
+        Ok(()) => out.push(format!("[ok]   storage: {} is writable", root.display())),
+        Err(error) => out.push(format!(
+            "[FAIL] storage: cannot write {} — {error}",
+            root.display()
+        )),
+    }
+
+    let mut site_lines = Vec::new();
+    let mut total = 0usize;
+    let mut ready = 0usize;
+    if let Ok(entries) = fs::read_dir(&root) {
+        let mut names: Vec<String> = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            total += 1;
+            let dir = site_dir(&name);
+            let observations = load_existing_observations(&name).len();
+            let has_spec = dir.join("toolspec.json").exists();
+            if observations == 0 {
+                site_lines.push(format!(
+                    "[warn] site '{name}': no observations — record or import a capture"
+                ));
+            } else if !has_spec {
+                site_lines.push(format!(
+                    "[warn] site '{name}': {observations} observation(s) but no ToolSpec — run `tapestry generate {name}`"
+                ));
+            } else {
+                ready += 1;
+            }
+            let meta = load_site_meta(&name);
+            if let (Some(failure), success) =
+                (&meta.auth.last_auth_failure, &meta.auth.last_success)
+            {
+                let stale = success
+                    .as_ref()
+                    .map(|success| failure.as_str() > success.as_str())
+                    .unwrap_or(true);
+                if stale {
+                    site_lines.push(format!(
+                        "[warn] site '{name}': credentials look stale (last auth failure {failure}) — run `tapestry reauth {name}`"
+                    ));
+                }
+            }
+            let unhealthy: Vec<&String> = meta
+                .tool_health
+                .iter()
+                .filter(|(_, health)| health.status != "healthy")
+                .map(|(tool_id, _)| tool_id)
+                .collect();
+            if !unhealthy.is_empty() {
+                site_lines.push(format!(
+                    "[warn] site '{name}': {} tool(s) degraded/broken — run `tapestry review {name}`",
+                    unhealthy.len()
+                ));
+            }
+        }
+    }
+    out.push(format!(
+        "[ok]   sites: {total} total, {ready} ready (observations + ToolSpec)"
+    ));
+    out.extend(site_lines);
+
+    out.push(String::new());
+    out.push("Done. [FAIL] items block core workflows; [warn] items affect one site.".to_string());
+    out.join("\n")
+}
+
+/// Drop approvals whose tool disappeared or changed request shape during `generate`.
+fn prune_stale_approvals(site: &str, spec: &tapestry_core::ToolSpec) -> Result<()> {
+    let approvals_path = site_dir(site).join("approvals.json");
+    let approvals = tapestry_runtime::load_approvals(&approvals_path)?;
+    if approvals.is_empty() {
+        return Ok(());
+    }
+    let mut kept = std::collections::BTreeMap::new();
+    let mut dropped: Vec<(String, &'static str)> = Vec::new();
+    for (tool_id, record) in approvals {
+        match spec.tools.iter().find(|tool| tool.id == tool_id) {
+            Some(tool) if tapestry_runtime::tool_fingerprint(tool) == record.fingerprint => {
+                kept.insert(tool_id, record);
+            }
+            Some(_) => dropped.push((tool_id, "request shape changed")),
+            None => dropped.push((tool_id, "tool no longer exists")),
+        }
+    }
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    write_protected(&approvals_path, &serde_json::to_string_pretty(&kept)?)?;
+    for (tool_id, reason) in &dropped {
+        println!(
+            "Dropped approval for '{tool_id}' ({reason}). Re-review with `tapestry approve {site} {tool_id}` if still wanted."
+        );
+    }
+    Ok(())
+}
+
+/// Why a tool needs approval before `call_tool` will execute it, if it does.
+fn approval_requirement(tool: &tapestry_core::ToolDefinition) -> Option<&'static str> {
+    if tool.safety.classification == tapestry_core::SafetyClassification::Unknown {
+        return Some("unknown safety");
+    }
+    if tool.safety.classification != tapestry_core::SafetyClassification::Read {
+        return Some("write tool");
+    }
+    if tool.confidence.overall < tapestry_runtime::DEFAULT_CONFIDENCE_THRESHOLD {
+        return Some("low confidence");
+    }
+    None
+}
+
+fn safety_label(classification: &tapestry_core::SafetyClassification) -> &'static str {
+    match classification {
+        tapestry_core::SafetyClassification::Read => "read",
+        tapestry_core::SafetyClassification::Write => "write",
+        tapestry_core::SafetyClassification::Unknown => "unknown",
+    }
+}
+
+fn format_approval_status(
+    site: &str,
+    spec: &tapestry_core::ToolSpec,
+    approvals: &std::collections::BTreeMap<String, tapestry_runtime::ApprovalRecord>,
+) -> String {
+    let mut out = format!(
+        "Approval status for site '{}' ({} tools):\n\n",
+        site,
+        spec.tools.len()
+    );
+    let mut pending = 0usize;
+    for tool in &spec.tools {
+        let requirement = approval_requirement(tool);
+        let (status, reason) = match (requirement, tool.approved) {
+            (None, _) => ("-", "  no approval needed".to_string()),
+            (Some(_), true) => ("approved", String::new()),
+            (Some(reason), false) => {
+                pending += 1;
+                ("PENDING", format!("  needs approval: {reason}"))
+            }
+        };
+        let evidence_count: usize = tool.evidence.iter().map(|e| e.count).sum();
+        out.push_str(&format!(
+            "  {:<9} {:<28} {:<7} confidence {:.2}  {} {}  ({} observation{}){}\n",
+            status,
+            tool.id,
+            safety_label(&tool.safety.classification),
+            tool.confidence.overall,
+            tool.method,
+            tool.path,
+            evidence_count,
+            if evidence_count == 1 { "" } else { "s" },
+            reason
+        ));
+    }
+    for (tool_id, record) in approvals {
+        if !spec.tools.iter().any(|tool| tool.id == *tool_id) {
+            out.push_str(&format!(
+                "  orphaned  {:<28} approval stored {} but tool no longer exists\n",
+                tool_id, record.approved_at
+            ));
+        }
+    }
+    if pending > 0 {
+        out.push_str(&format!(
+            "\nApprove with: tapestry approve {site} <tool_id>\nInspect first: tapestry tools evidence {site} <tool_id>"
+        ));
+    } else {
+        out.push_str("\nNo tools are pending approval.");
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -453,8 +1434,18 @@ enum ReviewFormat {
     Json,
 }
 
+fn sites_root() -> PathBuf {
+    PathBuf::from(".tapestry-dev").join("sites")
+}
+
 fn site_dir(site: &str) -> PathBuf {
-    PathBuf::from(".tapestry-dev").join("sites").join(site)
+    sites_root().join(site)
+}
+
+/// Persistent browser profile for a site (logins survive across record and
+/// reauth sessions). Contains session cookies — purged with `--secrets`.
+fn site_profile_dir(site: &str, ephemeral: bool) -> Option<PathBuf> {
+    (!ephemeral).then(|| site_dir(site).join("browser-profile"))
 }
 
 fn validate_site_name(site: &str) -> Result<()> {
@@ -483,8 +1474,134 @@ fn write_protected(path: &std::path::Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Write a file containing secrets, restricting access to the current user.
+///
+/// On Unix this is mode 0600. On Windows, where Unix modes are a no-op, the
+/// ACL is rewritten via `icacls`: inheritance removed, current user granted
+/// full control, everyone else implicitly denied. Failure to restrict is
+/// reported but does not lose the write.
+fn write_secret(path: &std::path::Path, content: &str) -> Result<()> {
+    write_protected(path, content)?;
+    restrict_to_current_user(path);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn restrict_to_current_user(path: &std::path::Path) {
+    let Ok(user) = std::env::var("USERNAME") else {
+        eprintln!(
+            "Warning: USERNAME not set; could not restrict permissions on {}",
+            path.display()
+        );
+        return;
+    };
+    let restricted = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:F"))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !restricted {
+        eprintln!(
+            "Warning: could not restrict permissions on {} — it may be readable by other local users.",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn restrict_to_current_user(_path: &std::path::Path) {}
+
 fn load_site_spec(site: &str) -> Result<tapestry_core::ToolSpec> {
-    tapestry_runtime::load_toolspec(site_dir(site).join("toolspec.json"))
+    let dir = site_dir(site);
+    let mut spec = tapestry_runtime::load_toolspec(dir.join("toolspec.json"))?;
+    let approvals = tapestry_runtime::load_approvals(dir.join("approvals.json"))?;
+    let overlay = tapestry_runtime::apply_approvals(&mut spec, &approvals);
+    for tool_id in &overlay.stale {
+        eprintln!(
+            "Warning: approval for '{tool_id}' no longer applies because the tool's request shape changed; re-approve with `tapestry approve {site} {tool_id}`."
+        );
+    }
+    for tool_id in &overlay.orphaned {
+        eprintln!(
+            "Warning: stored approval for '{tool_id}' refers to a tool that no longer exists on site '{site}'."
+        );
+    }
+    apply_health_warnings(site, &mut spec);
+    let meta = load_site_meta(site);
+    if let Some(failure) = &meta.auth.last_auth_failure {
+        let stale = match &meta.auth.last_success {
+            Some(success) => failure.as_str() > success.as_str(),
+            None => true,
+        };
+        if stale {
+            eprintln!(
+                "Warning: credentials for site '{site}' look stale (last auth failure {failure}). Refresh with `tapestry reauth {site}`."
+            );
+        }
+    }
+    Ok(spec)
+}
+
+fn load_site_credentials(site: &str) -> Result<std::collections::BTreeMap<String, String>> {
+    tapestry_runtime::load_credentials(site_dir(site).join("credentials.json"))
+}
+
+fn load_credentials_raw(
+    path: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    if !path.exists() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let raw = fs::read_to_string(path).context("failed to read credentials")?;
+    Ok(serde_json::from_str(&raw).context("failed to parse credentials JSON")?)
+}
+
+fn current_timestamp_cli() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (y, mo, d) = days_to_ymd(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    let mut y = 1970u64;
+    let mut rem = days;
+    loop {
+        let dy = if is_leap(y) { 366 } else { 365 };
+        if rem < dy {
+            break;
+        }
+        rem -= dy;
+        y += 1;
+    }
+    let months = if is_leap(y) {
+        [31u64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut mo = 1u64;
+    for dm in months {
+        if rem < dm {
+            break;
+        }
+        rem -= dm;
+        mo += 1;
+    }
+    (y, mo, rem + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
 fn load_site_observations(site: &str) -> Result<Vec<tapestry_core::Observation>> {
@@ -520,7 +1637,19 @@ fn print_record_guidance() {
 }
 
 fn record_guidance_text() -> &'static str {
-    "Now perform:\n- search\n- open detail\n- add to basket\n- view basket\nPress Enter when done."
+    "Recording started.\n\nNow interact with the site:\n- search/list something\n- open a detail page\n- perform a relevant workflow step\n- wait for results to load\n\nPress Enter when finished."
+}
+
+fn record_low_signal_failure(
+    summary: &tapestry_input::CaptureSummary,
+    min_api_observations: usize,
+    allow_low_signal: bool,
+) -> Option<String> {
+    if allow_low_signal {
+        return None;
+    }
+
+    summary.minimum_api_failure_message(min_api_observations)
 }
 
 fn runtime_options_for(
@@ -718,12 +1847,82 @@ struct BenchmarkReport {
     expected_match_count: usize,
     drift_count: usize,
     cases: Vec<BenchmarkCaseReport>,
+    /// HAR-vs-CDP comparison for sites captured both ways. The release gate
+    /// for recommending live recording is: CDP meets HAR on every pair.
+    capture_parity: Vec<CaptureParityReport>,
+    /// Token cost of the meta-tool interface vs stuffing every generated
+    /// tool schema into agent context. Measures the PRD's context-reduction
+    /// claim instead of asserting it.
+    context_reduction: ContextReductionReport,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextReductionReport {
+    /// Estimated tokens of the four meta-tool definitions an MCP agent sees,
+    /// regardless of how many tools a site has.
+    meta_tool_tokens: usize,
+    sites: Vec<SiteContextCost>,
+    /// Mean reduction across sites with at least one generated tool.
+    mean_reduction: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SiteContextCost {
+    site: String,
+    tools: usize,
+    /// Estimated tokens if every generated tool schema sat in agent context.
+    full_toolspec_tokens: usize,
+    /// 1 - meta/full; `None` when the site has no tools to compare against.
+    reduction: Option<f64>,
+}
+
+/// Rough token estimate (chars / 4) — good enough for order-of-magnitude
+/// context comparisons, not billing.
+fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+fn build_context_reduction(
+    site_specs: &[(String, tapestry_core::ToolSpec)],
+) -> ContextReductionReport {
+    let meta_config = mcp::McpServerConfig {
+        default_site: Some("site".to_string()),
+        live: false,
+        offline: false,
+        max_pages: 1,
+    };
+    let meta_tool_tokens = estimate_tokens(&mcp::tool_definitions(&meta_config).to_string());
+
+    let mut sites = Vec::new();
+    for (site, spec) in site_specs {
+        let full = serde_json::to_string(&spec.tools).unwrap_or_default();
+        let full_toolspec_tokens = estimate_tokens(&full);
+        let reduction = (!spec.tools.is_empty())
+            .then(|| 1.0 - meta_tool_tokens as f64 / full_toolspec_tokens as f64);
+        sites.push(SiteContextCost {
+            site: site.clone(),
+            tools: spec.tools.len(),
+            full_toolspec_tokens,
+            reduction,
+        });
+    }
+
+    let reductions: Vec<f64> = sites.iter().filter_map(|site| site.reduction).collect();
+    let mean_reduction = (!reductions.is_empty())
+        .then(|| reductions.iter().sum::<f64>() / reductions.len() as f64);
+
+    ContextReductionReport {
+        meta_tool_tokens,
+        sites,
+        mean_reduction,
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct BenchmarkCaseReport {
     site: String,
     capture_variant: Option<String>,
+    parity_group: Option<String>,
     task: String,
     expected_outcome: String,
     expected_tool: Option<String>,
@@ -735,6 +1934,9 @@ struct BenchmarkCaseReport {
     tool_matches_expected: Option<bool>,
     review_grade: Option<String>,
     diagnose_summary: DiagnoseSummary,
+    /// Fraction of the case's expected endpoints observed in the capture.
+    /// `None` when the case defines no ground-truth endpoint list.
+    endpoint_coverage: Option<f64>,
     ranking_note: Option<String>,
 }
 
@@ -743,9 +1945,134 @@ struct BenchmarkCase {
     site: String,
     #[serde(default)]
     capture_variant: Option<String>,
+    /// Cases sharing a group name are captures of the same app via different
+    /// methods and get compared in the capture-parity report.
+    #[serde(default)]
+    parity_group: Option<String>,
     task: String,
     expected_outcome: String,
     expected_tool: Option<String>,
+    /// Ground-truth endpoints the app is known to expose. Comparing capture
+    /// methods only against each other can't detect when both miss the same
+    /// traffic; this can.
+    #[serde(default)]
+    expected_endpoints: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureParityReport {
+    group: String,
+    har_site: String,
+    cdp_site: String,
+    har: CaptureVariantMetrics,
+    cdp: CaptureVariantMetrics,
+    cdp_meets_har: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CaptureVariantMetrics {
+    observations: usize,
+    api_observations: usize,
+    response_bodies: usize,
+    tools: usize,
+    replayable_tools: usize,
+    endpoint_coverage: Option<f64>,
+    agent_success: bool,
+    failure_type: Option<String>,
+}
+
+impl CaptureVariantMetrics {
+    fn from_case(case: &BenchmarkCaseReport) -> Self {
+        Self {
+            observations: case.diagnose_summary.total_observations,
+            api_observations: case.diagnose_summary.candidate_api_observations,
+            response_bodies: case.diagnose_summary.observations_with_response_bodies,
+            tools: case.diagnose_summary.generated_tools,
+            replayable_tools: case
+                .diagnose_summary
+                .generated_tools
+                .saturating_sub(case.diagnose_summary.tools_missing_examples),
+            endpoint_coverage: case.endpoint_coverage,
+            agent_success: case.success,
+            failure_type: case.failure_type.clone(),
+        }
+    }
+}
+
+/// Pair har/cdp case reports that share a parity group.
+fn build_capture_parity(cases: &[BenchmarkCaseReport]) -> Vec<CaptureParityReport> {
+    let mut groups: Vec<String> = cases
+        .iter()
+        .filter_map(|case| case.parity_group.clone())
+        .collect();
+    groups.sort();
+    groups.dedup();
+
+    let mut reports = Vec::new();
+    for group in groups {
+        let of_variant = |want_cdp: bool| {
+            cases.iter().find(|case| {
+                case.parity_group.as_deref() == Some(group.as_str())
+                    && (case.capture_variant.as_deref() == Some("cdp")) == want_cdp
+            })
+        };
+        let (Some(har_case), Some(cdp_case)) = (of_variant(false), of_variant(true)) else {
+            continue;
+        };
+        let har = CaptureVariantMetrics::from_case(har_case);
+        let cdp = CaptureVariantMetrics::from_case(cdp_case);
+        let coverage_ok = match (har.endpoint_coverage, cdp.endpoint_coverage) {
+            (Some(har_cov), Some(cdp_cov)) => cdp_cov >= har_cov,
+            _ => true,
+        };
+        let cdp_meets_har = (cdp.agent_success || !har.agent_success)
+            && cdp.api_observations >= har.api_observations
+            && cdp.replayable_tools >= har.replayable_tools
+            && coverage_ok;
+        reports.push(CaptureParityReport {
+            group,
+            har_site: har_case.site.clone(),
+            cdp_site: cdp_case.site.clone(),
+            har,
+            cdp,
+            cdp_meets_har,
+        });
+    }
+    reports
+}
+
+/// Coverage of ground-truth endpoints in a capture's observations.
+/// `{param}` segments in the expected pattern match any single path segment.
+fn endpoint_coverage(
+    expected_endpoints: &[String],
+    observations: &[tapestry_core::Observation],
+) -> Option<f64> {
+    if expected_endpoints.is_empty() {
+        return None;
+    }
+    let observed = expected_endpoints
+        .iter()
+        .filter(|pattern| {
+            observations
+                .iter()
+                .any(|obs| endpoint_pattern_matches(pattern, &obs.path))
+        })
+        .count();
+    Some(observed as f64 / expected_endpoints.len() as f64)
+}
+
+fn endpoint_pattern_matches(pattern: &str, path: &str) -> bool {
+    let pattern_segments: Vec<&str> = pattern.trim_matches('/').split('/').collect();
+    let path_segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if path_segments.len() < pattern_segments.len() {
+        return false;
+    }
+    pattern_segments
+        .iter()
+        .zip(path_segments.iter())
+        .all(|(expected, actual)| {
+            (expected.starts_with('{') && expected.ends_with('}')) || expected == actual
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -782,9 +2109,13 @@ fn validate_site(
 
 fn run_benchmark_suite() -> Result<BenchmarkReport> {
     let mut cases = Vec::new();
+    let mut site_specs: Vec<(String, tapestry_core::ToolSpec)> = Vec::new();
     for case in benchmark_cases() {
         let spec = load_site_spec(&case.site)?;
         let observations = load_site_observations(&case.site)?;
+        if !site_specs.iter().any(|(site, _)| site == &case.site) {
+            site_specs.push((case.site.clone(), spec.clone()));
+        }
         let options = tapestry_runtime::RuntimeOptions {
             max_pages: 1,
             allow_har_replay: true,
@@ -808,6 +2139,7 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
         cases.push(BenchmarkCaseReport {
             site: report.site.clone(),
             capture_variant: case.capture_variant,
+            parity_group: case.parity_group,
             task: report.agent_task.task.clone(),
             expected_outcome: case.expected_outcome,
             expected_tool: case.expected_tool,
@@ -819,6 +2151,7 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
             tool_matches_expected,
             review_grade: selected_tool_grade,
             diagnose_summary: report.diagnose_summary.clone(),
+            endpoint_coverage: endpoint_coverage(&case.expected_endpoints, &observations),
             ranking_note: report.agent_task.ranking_note.clone(),
         });
     }
@@ -830,6 +2163,8 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
         .filter(|case| case.outcome_matches_expected)
         .count();
     let drift_count = cases.len().saturating_sub(expected_match_count);
+    let capture_parity = build_capture_parity(&cases);
+    let context_reduction = build_context_reduction(&site_specs);
 
     Ok(BenchmarkReport {
         total_sites: cases.len(),
@@ -838,6 +2173,8 @@ fn run_benchmark_suite() -> Result<BenchmarkReport> {
         expected_match_count,
         drift_count,
         cases,
+        capture_parity,
+        context_reduction,
     })
 }
 
@@ -917,9 +2254,63 @@ fn format_benchmark_text(report: &BenchmarkReport) -> String {
             "Expected matches: {} drift: {}",
             report.expected_match_count, report.drift_count
         ),
-        String::new(),
-        "Cases:".to_string(),
     ];
+
+    if !report.capture_parity.is_empty() {
+        out.push(String::new());
+        out.push("Capture parity (HAR vs CDP):".to_string());
+        for parity in &report.capture_parity {
+            let verdict = if parity.cdp_meets_har {
+                "CDP meets HAR"
+            } else {
+                "CDP BELOW HAR — re-record or investigate"
+            };
+            out.push(format!("- group={} : {}", parity.group, verdict));
+            for (label, metrics) in [("har", &parity.har), ("cdp", &parity.cdp)] {
+                let coverage = metrics
+                    .endpoint_coverage
+                    .map(|value| format!("{:.0}%", value * 100.0))
+                    .unwrap_or_else(|| "n/a".to_string());
+                out.push(format!(
+                    "  {label}: obs={} api={} bodies={} tools={} replayable={} endpoint_coverage={} agent_success={}{}",
+                    metrics.observations,
+                    metrics.api_observations,
+                    metrics.response_bodies,
+                    metrics.tools,
+                    metrics.replayable_tools,
+                    coverage,
+                    metrics.agent_success,
+                    metrics
+                        .failure_type
+                        .as_deref()
+                        .map(|failure| format!(" failure={failure}"))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+    }
+
+    out.push(String::new());
+    out.push(format!(
+        "Context reduction (token estimate): meta-tool surface = {} tokens{}",
+        report.context_reduction.meta_tool_tokens,
+        report
+            .context_reduction
+            .mean_reduction
+            .map(|mean| format!(", mean reduction {:.1}%", mean * 100.0))
+            .unwrap_or_default()
+    ));
+    for site in &report.context_reduction.sites {
+        if let Some(reduction) = site.reduction {
+            out.push(format!(
+                "  {}: {} tool(s), full toolspec ~{} tokens -> {:.1}% reduction",
+                site.site, site.tools, site.full_toolspec_tokens, reduction * 100.0
+            ));
+        }
+    }
+
+    out.push(String::new());
+    out.push("Cases:".to_string());
 
     for case in &report.cases {
         let review_grade = case.review_grade.as_deref().unwrap_or("none");
@@ -2141,64 +3532,105 @@ fn run_agent_task(
         ));
     }
 
-    let Some(selection) = select_agent_tool(spec, observations, task, options) else {
+    let candidates = select_agent_candidates(spec, observations, task, options);
+    if candidates.is_empty() {
         out.push("No matching tool found. Try a task that mentions an observed endpoint or import a richer HAR.".to_string());
         return out.join("\n");
-    };
-
-    if trace {
-        out.extend(selection.ranking_notes.iter().cloned());
     }
 
-    if trace {
-        out.push(format!(
-            "[agent] selected tool={} score={}",
-            selection.result.name, selection.result.score
-        ));
-    }
+    // Try candidates in rank order; retry on recoverable tool-selection failures
+    let mut tried: Vec<String> = Vec::new();
+    let mut final_response: Option<Value> = None;
 
-    if trace {
-        out.push("[agent] schema loaded".to_string());
-    }
-
-    if trace {
-        out.push(format!("[agent] arguments={}", selection.plan.arguments));
-        for provenance in &selection.plan.provenance {
-            out.push(format!(
-                "[agent] arg {} inferred from {}",
-                provenance.name, provenance.source
-            ));
+    for selection in &candidates {
+        if tried.contains(&selection.result.id) {
+            continue;
         }
+        tried.push(selection.result.id.clone());
+
+        if trace {
+            out.extend(selection.ranking_notes.iter().cloned());
+            out.push(format!(
+                "[agent] selected tool={} score={}",
+                selection.result.name, selection.result.score
+            ));
+            out.push("[agent] schema loaded".to_string());
+            out.push(format!("[agent] arguments={}", selection.plan.arguments));
+            for provenance in &selection.plan.provenance {
+                out.push(format!(
+                    "[agent] arg {} inferred from {}",
+                    provenance.name, provenance.source
+                ));
+            }
+        }
+
+        if selection.result.safety == tapestry_core::SafetyClassification::Read
+            && !selection.plan.missing.is_empty()
+        {
+            out.push(format_missing_argument_guidance(spec, &selection));
+            return out.join("\n");
+        }
+
+        let response = tapestry_runtime::call_tool_with_options(
+            spec,
+            &selection.result.id,
+            selection.plan.arguments.clone(),
+            options,
+        );
+
+        if response.get("status").and_then(Value::as_str) == Some("success") {
+            if trace {
+                out.push("[agent] call_tool success".to_string());
+            }
+            final_response = Some(response);
+            break;
+        }
+
+        let error_type = response
+            .get("error_type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+
+        if trace {
+            out.push(format!("[agent] call_tool error={error_type}"));
+        }
+
+        // Auth failures and approval gates affect all tools — stop immediately
+        if matches!(error_type, "auth_expired" | "approval_required") {
+            final_response = Some(response);
+            break;
+        }
+
+        // endpoint_error (wrong tool, 404, 5xx) or schema_mismatch — try next candidate
+        if tried.len() < 3 && candidates.len() > tried.len() {
+            if trace {
+                out.push(format!(
+                    "[agent] retrying with next ranked tool (attempt {})",
+                    tried.len() + 1
+                ));
+            }
+            final_response = Some(response);
+            continue;
+        }
+
+        final_response = Some(response);
+        break;
     }
 
-    if selection.result.safety == tapestry_core::SafetyClassification::Read
-        && !selection.plan.missing.is_empty()
-    {
-        out.push(format_missing_argument_guidance(spec, &selection));
-        return out.join("\n");
-    }
+    let response = final_response.unwrap_or_else(|| {
+        serde_json::json!({"status":"error","error_type":"no_tool_succeeded","message":"All ranked tools failed"})
+    });
 
-    let response = tapestry_runtime::call_tool_with_options(
-        spec,
-        &selection.result.id,
-        selection.plan.arguments,
-        options,
-    );
     if response.get("status").and_then(Value::as_str) == Some("success") {
-        if trace {
-            out.push("[agent] call_tool success".to_string());
-        }
-        out.push(summarize_success(&selection.result.name, &response));
+        out.push(summarize_success(
+            &candidates
+                .iter()
+                .find(|s| tried.last() == Some(&s.result.id))
+                .map(|s| s.result.name.as_str())
+                .unwrap_or("tool"),
+            &response,
+        ));
     } else {
-        if trace {
-            out.push(format!(
-                "[agent] call_tool error={}",
-                response
-                    .get("error_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            ));
-        }
         out.push(summarize_error(&response));
     }
 
@@ -2248,6 +3680,17 @@ fn select_agent_tool(
     task: &str,
     options: &tapestry_runtime::RuntimeOptions,
 ) -> Option<AgentToolSelection> {
+    select_agent_candidates(spec, observations, task, options)
+        .into_iter()
+        .next()
+}
+
+fn select_agent_candidates(
+    spec: &tapestry_core::ToolSpec,
+    observations: &[tapestry_core::Observation],
+    task: &str,
+    options: &tapestry_runtime::RuntimeOptions,
+) -> Vec<AgentToolSelection> {
     let intent = tapestry_runtime::classify_task_intent(task);
     let limit = spec.tools.len().max(5);
     let mut candidates = tapestry_runtime::search_tools(spec, task, limit)
@@ -2276,16 +3719,14 @@ fn select_agent_tool(
 
     candidates
         .into_iter()
-        .next()
-        .map(
-            |(_, result, plan, replayable, ranking_notes)| AgentToolSelection {
-                result,
-                plan,
-                replayable,
-                intent,
-                ranking_notes,
-            },
-        )
+        .map(|(_, result, plan, replayable, ranking_notes)| AgentToolSelection {
+            result,
+            plan,
+            replayable,
+            intent,
+            ranking_notes,
+        })
+        .collect()
 }
 
 fn agent_selection_score(
@@ -2362,7 +3803,29 @@ fn agent_selection_score(
             ));
         }
     }
+    // Penalise framework-generated versioned paths regardless of mode
+    if is_framework_path_cli(&tool.path) {
+        score -= 40;
+        notes.push(format!("[agent] rank penalty framework_path {}", result.name));
+    }
+
+    // Penalise low-confidence tools so high-quality tools rank above them
+    if result.confidence < 0.5 {
+        score -= 30;
+        notes.push(format!("[agent] rank penalty low_confidence {}", result.name));
+    } else if result.confidence < 0.7 {
+        score -= 10;
+        notes.push(format!("[agent] rank penalty below_threshold_confidence {}", result.name));
+    }
+
     RankingScore { score, notes }
+}
+
+fn is_framework_path_cli(path: &str) -> bool {
+    path.contains("/_next/")
+        || path.contains("/_nuxt/")
+        || path.contains("/_app/")
+        || path.contains("/_astro/")
 }
 
 fn intent_ranking_adjustment(
@@ -2376,10 +3839,12 @@ fn intent_ranking_adjustment(
     let path = tool.path.to_ascii_lowercase();
     let description = tool.description.to_ascii_lowercase();
     let text = format!("{name} {path} {description}");
+    // "list" excluded — all GET non-detail tools are named list_* by convention;
+    // matching on it would give equal boosts to manifests, configs, and real list endpoints.
     let has_search_terms = contains_any_cli(
         &text,
         &[
-            "search", "query", "list", "products", "flights", "holidays", "items",
+            "search", "query", "products", "flights", "holidays", "items",
         ],
     );
     let has_write_terms = contains_any_cli(
@@ -3328,6 +4793,144 @@ mod tests {
     use tapestry_core::*;
 
     #[test]
+    fn merge_skips_exact_duplicates_and_keeps_new_evidence() {
+        let existing = vec![observation(
+            "GET",
+            "http://x.test/api/items",
+            None,
+            Some(json!({"items":[1]})),
+        )];
+        let incoming = vec![
+            // Exact duplicate: dropped.
+            observation(
+                "GET",
+                "http://x.test/api/items",
+                None,
+                Some(json!({"items":[1]})),
+            ),
+            // Same endpoint, different response: kept as new evidence.
+            observation(
+                "GET",
+                "http://x.test/api/items",
+                None,
+                Some(json!({"items":[2]})),
+            ),
+            // New endpoint: kept.
+            observation(
+                "GET",
+                "http://x.test/api/users",
+                None,
+                Some(json!({"users":[]})),
+            ),
+        ];
+
+        let outcome = merge_observations(existing, incoming);
+
+        assert!(outcome.merged_into_existing);
+        assert_eq!(outcome.added, 2);
+        assert_eq!(outcome.duplicates, 1);
+        assert_eq!(outcome.observations.len(), 3);
+    }
+
+    #[test]
+    fn merge_into_empty_site_reports_fresh_import() {
+        let incoming = vec![observation("GET", "http://x.test/api/items", None, None)];
+        let outcome = merge_observations(Vec::new(), incoming);
+        assert!(!outcome.merged_into_existing);
+        assert_eq!(outcome.added, 1);
+        assert_eq!(
+            format_capture_message("demo", &outcome, "Imported"),
+            "Imported 1 observations for site 'demo'"
+        );
+    }
+
+    #[test]
+    fn merged_capture_message_reports_new_duplicates_and_total() {
+        let existing = vec![observation("GET", "http://x.test/api/items", None, None)];
+        let incoming = vec![
+            observation("GET", "http://x.test/api/items", None, None),
+            observation("GET", "http://x.test/api/users", None, None),
+        ];
+        let outcome = merge_observations(existing, incoming);
+        let message = format_capture_message("demo", &outcome, "Imported");
+        assert!(message.contains("1 new"));
+        assert!(message.contains("1 duplicate(s) skipped"));
+        assert!(message.contains("2 total"));
+    }
+
+    #[test]
+    fn health_classifies_conformant_live_success_as_healthy() {
+        let response = json!({
+            "status": "success",
+            "data": {},
+            "execution": { "mode": "live" },
+            "conformance": { "field_compatibility": 1.0, "missing_fields": [] }
+        });
+        let update = classify_tool_health(&response, "live", "T0", None);
+        let health = update.tool_health.expect("health recorded");
+        assert_eq!(health.status, "healthy");
+        assert_eq!(health.last_success.as_deref(), Some("T0"));
+        assert!(update.auth_success);
+        assert!(!update.auth_failure);
+    }
+
+    #[test]
+    fn health_classifies_low_conformance_as_degraded_with_detail() {
+        let response = json!({
+            "status": "success",
+            "data": {},
+            "execution": { "mode": "live" },
+            "conformance": { "field_compatibility": 0.25, "missing_fields": ["title", "owner"] }
+        });
+        let update = classify_tool_health(&response, "live", "T0", None);
+        let health = update.tool_health.expect("health recorded");
+        assert_eq!(health.status, "degraded");
+        let detail = health.detail.expect("detail");
+        assert!(detail.contains("25%"));
+        assert!(detail.contains("title, owner"));
+    }
+
+    #[test]
+    fn health_auth_expired_updates_auth_state_not_tool_health() {
+        let response = json!({
+            "status": "error",
+            "error_type": "auth_expired",
+            "http_status": 401
+        });
+        let update = classify_tool_health(&response, "live", "T0", None);
+        assert!(update.tool_health.is_none());
+        assert!(update.auth_failure);
+    }
+
+    #[test]
+    fn health_endpoint_error_is_broken_and_keeps_previous_success() {
+        let response = json!({
+            "status": "error",
+            "error_type": "endpoint_error",
+            "http_status": 500
+        });
+        let update =
+            classify_tool_health(&response, "live", "T1", Some("T0".to_string()));
+        let health = update.tool_health.expect("health recorded");
+        assert_eq!(health.status, "broken");
+        assert_eq!(health.http_status, Some(500));
+        assert_eq!(health.last_success.as_deref(), Some("T0"));
+    }
+
+    #[test]
+    fn health_ignores_approval_and_argument_errors() {
+        for response in [
+            json!({ "status": "error", "error_type": "approval_required" }),
+            json!({ "status": "error", "error_type": "schema_mismatch" }),
+            json!({ "status": "error", "error_type": "rate_limited", "http_status": 429 }),
+        ] {
+            let update = classify_tool_health(&response, "live", "T0", None);
+            assert!(update.tool_health.is_none(), "no health for {response}");
+            assert!(!update.auth_failure || response["error_type"] == "auth_expired");
+        }
+    }
+
+    #[test]
     fn agent_task_successfully_lists_and_summarizes_items() {
         let spec = spec(vec![list_tool()]);
         let output = run_agent_task(
@@ -3425,10 +5028,10 @@ mod tests {
     fn record_guidance_text_is_actionable() {
         let guidance = record_guidance_text();
 
-        assert!(guidance.contains("search"));
-        assert!(guidance.contains("open detail"));
-        assert!(guidance.contains("add to basket"));
-        assert!(guidance.contains("Press Enter when done."));
+        assert!(guidance.contains("Recording started."));
+        assert!(guidance.contains("search/list something"));
+        assert!(guidance.contains("open a detail page"));
+        assert!(guidance.contains("Press Enter when finished."));
     }
 
     #[test]
@@ -3467,6 +5070,34 @@ mod tests {
         assert!(summary.contains("Replayable tools (estimate): 1"));
         assert!(summary.contains("Missing response bodies: 1"));
         assert!(summary.contains("Recommended next action:"));
+    }
+
+    #[test]
+    fn record_low_signal_failure_respects_allow_low_signal() {
+        let summary = tapestry_input::CaptureSummary::from_observations(&[]);
+
+        assert!(record_low_signal_failure(&summary, 1, false).is_some());
+        assert!(record_low_signal_failure(&summary, 1, true).is_none());
+    }
+
+    #[test]
+    fn record_low_signal_failure_requires_minimum_api_observations() {
+        let observations = vec![Observation {
+            method: "GET".to_string(),
+            url: "https://example.com/page".to_string(),
+            path: "/page".to_string(),
+            query: Default::default(),
+            request_headers: Default::default(),
+            request_body: None,
+            response_status: Some(200),
+            response_headers: Default::default(),
+            response_body: None,
+            warnings: vec![],
+        }];
+        let summary = tapestry_input::CaptureSummary::from_observations(&observations);
+
+        assert!(record_low_signal_failure(&summary, 2, false).is_some());
+        assert!(record_low_signal_failure(&summary, 0, false).is_none());
     }
 
     #[test]
@@ -4290,8 +5921,10 @@ mod tests {
             .map(|case| case.site.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 15);
         assert!(sites.contains(&"tesco"));
+        assert!(sites.contains(&"localapp"));
+        assert!(sites.contains(&"localapp-cdp"));
         assert!(sites.contains(&"next"));
         assert!(sites.contains(&"next-cdp"));
         assert!(sites.contains(&"justkandy"));
@@ -4302,6 +5935,8 @@ mod tests {
         assert!(sites.contains(&"wowhead"));
         assert!(sites.contains(&"skyscanner"));
         assert!(sites.contains(&"onthebeach"));
+        assert!(sites.contains(&"fixture"));
+        assert!(sites.contains(&"rightmove"));
     }
 
     #[test]
@@ -4312,9 +5947,16 @@ mod tests {
             failure_count: 0,
             expected_match_count: 1,
             drift_count: 0,
+            capture_parity: Vec::new(),
+            context_reduction: ContextReductionReport {
+                meta_tool_tokens: 900,
+                sites: Vec::new(),
+                mean_reduction: None,
+            },
             cases: vec![BenchmarkCaseReport {
                 site: "fixture".to_string(),
                 capture_variant: Some("har".to_string()),
+                parity_group: None,
                 task: "Search for products".to_string(),
                 expected_outcome: "success".to_string(),
                 expected_tool: Some("list_items".to_string()),
@@ -4340,6 +5982,7 @@ mod tests {
                     telemetry_tools: 0,
                     commerce_api_tools: 1,
                 },
+                endpoint_coverage: Some(1.0),
                 ranking_note: Some("Offline ranking considered replayability.".to_string()),
             }],
         };
@@ -4355,6 +5998,170 @@ mod tests {
         assert!(text.contains("expected=success"));
         assert!(text.contains("failure_bucket=success"));
         assert!(text.contains("review_grade=A"));
+    }
+
+    #[test]
+    fn no_seeded_secret_survives_the_full_pipeline() {
+        // Import the seeded fixture, run the analyzer, and check every
+        // artifact an agent or log could ever see.
+        let observations =
+            tapestry_input::import_har("../../examples/fixtures/redaction.har").unwrap();
+        let spec = tapestry_analyzer::analyze("redaction-test", &observations);
+
+        let observations_json = serde_json::to_string(&observations).unwrap();
+        let toolspec_json = serde_json::to_string(&spec).unwrap();
+        assert!(!observations_json.contains("FAKESECRET"), "observations leaked");
+        assert!(!toolspec_json.contains("FAKESECRET"), "toolspec leaked");
+
+        // Review and diagnose reports are printed to stdout; they must be
+        // clean too.
+        let review = review_toolspec(&spec, None);
+        let review_json = serde_json::to_string(&review).unwrap();
+        assert!(!review_json.contains("FAKESECRET"), "review leaked");
+        let diagnose = diagnose_site(&spec, &observations);
+        let diagnose_json = serde_json::to_string(&diagnose).unwrap();
+        assert!(!diagnose_json.contains("FAKESECRET"), "diagnose leaked");
+
+        // Agent trace output (the noisiest path) must be clean as well.
+        let options = tapestry_runtime::RuntimeOptions {
+            offline_har_replay: true,
+            prefer_har_replay: true,
+            ..tapestry_runtime::RuntimeOptions::default()
+        };
+        let trace = run_agent_task(&spec, &observations, "list items", true, &options);
+        assert!(!trace.contains("FAKESECRET"), "agent trace leaked");
+    }
+
+    #[test]
+    fn endpoint_patterns_match_paths_with_params() {
+        assert!(endpoint_pattern_matches("/api/items", "/api/items"));
+        assert!(endpoint_pattern_matches("/api/items/{id}", "/api/items/42"));
+        assert!(endpoint_pattern_matches("/api/items", "/api/items/42"));
+        assert!(!endpoint_pattern_matches("/api/items/{id}", "/api/items"));
+        assert!(!endpoint_pattern_matches("/api/users", "/api/items"));
+    }
+
+    #[test]
+    fn endpoint_coverage_scores_against_ground_truth() {
+        let observations = vec![
+            observation("GET", "http://x.test/api/items?page=1", None, None),
+            observation("GET", "http://x.test/api/items/7", None, None),
+        ];
+        let expected = vec![
+            "/api/items".to_string(),
+            "/api/items/{id}".to_string(),
+            "/api/config".to_string(),
+        ];
+        let coverage = endpoint_coverage(&expected, &observations).expect("coverage");
+        assert!((coverage - 2.0 / 3.0).abs() < 1e-9);
+        assert!(endpoint_coverage(&[], &observations).is_none());
+    }
+
+    fn parity_case(
+        site: &str,
+        group: &str,
+        cdp: bool,
+        api_observations: usize,
+        success: bool,
+    ) -> BenchmarkCaseReport {
+        BenchmarkCaseReport {
+            site: site.to_string(),
+            capture_variant: cdp.then(|| "cdp".to_string()),
+            parity_group: Some(group.to_string()),
+            task: "task".to_string(),
+            expected_outcome: "success".to_string(),
+            expected_tool: None,
+            selected_tool: None,
+            success,
+            failure_type: (!success).then(|| "no_matching_tool".to_string()),
+            failure_bucket: "unknown".to_string(),
+            outcome_matches_expected: true,
+            tool_matches_expected: None,
+            review_grade: None,
+            diagnose_summary: DiagnoseSummary {
+                total_observations: api_observations + 1,
+                candidate_api_observations: api_observations,
+                generated_tools: api_observations,
+                observations_with_response_bodies: api_observations,
+                json_responses: api_observations,
+                graphql_requests: 0,
+                graphql_responses_mapped: 0,
+                tools_missing_examples: 0,
+                tools_with_empty_response_schemas: 0,
+                static_resource_tools: 0,
+                platform_resource_tools: 0,
+                telemetry_tools: 0,
+                commerce_api_tools: 0,
+            },
+            endpoint_coverage: None,
+            ranking_note: None,
+        }
+    }
+
+    #[test]
+    fn context_reduction_compares_meta_surface_against_full_toolspec() {
+        let spec = tapestry_analyzer::analyze(
+            "ctx",
+            &tapestry_input::import_har("../../examples/fixtures/simple.har").unwrap(),
+        );
+        assert!(!spec.tools.is_empty());
+
+        let report = build_context_reduction(&[
+            ("ctx".to_string(), spec),
+            (
+                "empty".to_string(),
+                ToolSpec {
+                    site: SiteInfo {
+                        name: "empty".to_string(),
+                        base_url: None,
+                        source: vec![],
+                        generated_at: None,
+                        spec_version: "0.1.0".to_string(),
+                    },
+                    tools: vec![],
+                },
+            ),
+        ]);
+
+        assert!(report.meta_tool_tokens > 0);
+        assert_eq!(report.sites.len(), 2);
+        let ctx = &report.sites[0];
+        assert!(ctx.full_toolspec_tokens > 0);
+        // Sites with no tools are excluded from the mean instead of skewing it.
+        assert!(report.sites[1].reduction.is_none());
+        assert_eq!(report.mean_reduction, ctx.reduction);
+    }
+
+    #[test]
+    fn capture_parity_pairs_variants_and_flags_regressions() {
+        let cases = vec![
+            parity_case("app", "app", false, 4, true),
+            parity_case("app-cdp", "app", true, 4, true),
+            parity_case("shop", "shop", false, 5, true),
+            parity_case("shop-cdp", "shop", true, 0, false),
+            // Unpaired case: no parity entry.
+            parity_case("solo", "solo", false, 2, true),
+        ];
+
+        let parity = build_capture_parity(&cases);
+
+        assert_eq!(parity.len(), 2);
+        let app = parity.iter().find(|p| p.group == "app").expect("app pair");
+        assert!(app.cdp_meets_har);
+        let shop = parity.iter().find(|p| p.group == "shop").expect("shop pair");
+        assert!(!shop.cdp_meets_har);
+        assert_eq!(shop.har.api_observations, 5);
+        assert_eq!(shop.cdp.api_observations, 0);
+    }
+
+    #[test]
+    fn capture_parity_accepts_cdp_success_when_har_failed() {
+        let cases = vec![
+            parity_case("app", "app", false, 2, false),
+            parity_case("app-cdp", "app", true, 3, true),
+        ];
+        let parity = build_capture_parity(&cases);
+        assert!(parity[0].cdp_meets_har);
     }
 
     #[test]
@@ -4375,6 +6182,9 @@ mod tests {
             "--include-third-party",
             "--output-observations",
             "--keep-profile",
+            "--min-api-observations",
+            "3",
+            "--allow-low-signal",
         ]);
 
         match cli.command {
@@ -4388,7 +6198,13 @@ mod tests {
                 include_third_party,
                 output_observations,
                 keep_profile,
+                min_api_observations,
+                allow_low_signal,
+                replace,
+                ephemeral_profile,
             } => {
+                assert!(!replace);
+                assert!(!ephemeral_profile);
                 assert_eq!(url, "https://example.com");
                 assert_eq!(site, "demo");
                 assert_eq!(browser.as_deref(), Some(std::path::Path::new("chrome.exe")));
@@ -4398,6 +6214,8 @@ mod tests {
                 assert!(include_third_party);
                 assert!(output_observations);
                 assert!(keep_profile);
+                assert_eq!(min_api_observations, 3);
+                assert!(allow_low_signal);
             }
             other => panic!("unexpected command: {:?}", other),
         }

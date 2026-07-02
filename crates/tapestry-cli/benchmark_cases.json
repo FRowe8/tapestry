@@ -12,6 +12,7 @@
   },
   {
     "site": "next",
+    "parity_group": "next",
     "task": "Search for products",
     "expected_outcome": "success",
     "expected_tool": "list_index.json"
@@ -19,11 +20,13 @@
   {
     "site": "next-cdp",
     "capture_variant": "cdp",
+    "parity_group": "next",
     "task": "Search for products",
     "expected_outcome": "no_matching_tool"
   },
   {
     "site": "justkandy",
+    "parity_group": "justkandy",
     "task": "cart checkout basket",
     "expected_outcome": "success",
     "expected_tool": "list_query"
@@ -31,6 +34,7 @@
   {
     "site": "justkandy-cdp",
     "capture_variant": "cdp",
+    "parity_group": "justkandy",
     "task": "cart checkout basket",
     "expected_outcome": "no_matching_tool"
   },
@@ -62,5 +66,34 @@
     "task": "Search for holidays",
     "expected_outcome": "success",
     "expected_tool": "recommended_deals_search_holidays_by_destination_ids"
+  },
+  {
+    "site": "fixture",
+    "task": "List the most recent 5 items",
+    "expected_outcome": "success",
+    "expected_tool": "list_items"
+  },
+  {
+    "site": "localapp",
+    "parity_group": "localapp",
+    "task": "List the most recent 5 items",
+    "expected_outcome": "success",
+    "expected_tool": "list_items",
+    "expected_endpoints": ["/api/items", "/api/items/{id}", "/api/config"]
+  },
+  {
+    "site": "localapp-cdp",
+    "capture_variant": "cdp",
+    "parity_group": "localapp",
+    "task": "List the most recent 5 items",
+    "expected_outcome": "success",
+    "expected_tool": "list_items",
+    "expected_endpoints": ["/api/items", "/api/items/{id}", "/api/config"]
+  },
+  {
+    "site": "rightmove",
+    "task": "Search for properties",
+    "expected_outcome": "missing_required_argument",
+    "expected_tool": "list_search"
   }
 ]
