@@ -387,23 +387,26 @@ fn main() -> Result<()> {
             for warning in &warnings {
                 eprintln!("Warning: {warning}");
             }
-            let session_observations = observations.clone();
-            let outcome = store_capture(&site, &format!("cdp:{url}"), observations, replace)?;
-            if output_observations {
-                println!("{}", serde_json::to_string_pretty(&session_observations)?);
-            }
-            if outcome.merged_into_existing {
-                println!("{}", format_capture_message(&site, &outcome, "Recorded"));
-            }
-            println!("{}", format_record_summary(&site, &session_observations));
+            // Reject a low-signal capture before persisting anything, so a
+            // failed re-record never overwrites (or, with --replace, destroys)
+            // an existing good capture.
             if let Some(message) =
                 record_low_signal_failure(&summary, min_api_observations, allow_low_signal)
             {
                 anyhow::bail!(
-                    "{} Use --allow-low-signal to save this capture anyway.",
+                    "{} Nothing was saved. Use --allow-low-signal to keep this capture anyway.",
                     message
                 );
             }
+            if output_observations {
+                println!("{}", serde_json::to_string_pretty(&observations)?);
+            }
+            let summary_text = format_record_summary(&site, &observations);
+            let outcome = store_capture(&site, &format!("cdp:{url}"), observations, replace)?;
+            if outcome.merged_into_existing {
+                println!("{}", format_capture_message(&site, &outcome, "Recorded"));
+            }
+            println!("{summary_text}");
         }
         Command::Generate { site } => {
             validate_site_name(&site)?;
@@ -2064,7 +2067,10 @@ fn endpoint_coverage(
 fn endpoint_pattern_matches(pattern: &str, path: &str) -> bool {
     let pattern_segments: Vec<&str> = pattern.trim_matches('/').split('/').collect();
     let path_segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-    if path_segments.len() < pattern_segments.len() {
+    // Require the same segment count: an expected `/api/items` must not be
+    // counted as covered by a deeper `/api/items/42/reviews`, which would
+    // inflate endpoint coverage in the capture-parity gate.
+    if path_segments.len() != pattern_segments.len() {
         return false;
     }
     pattern_segments
@@ -6036,7 +6042,8 @@ mod tests {
     fn endpoint_patterns_match_paths_with_params() {
         assert!(endpoint_pattern_matches("/api/items", "/api/items"));
         assert!(endpoint_pattern_matches("/api/items/{id}", "/api/items/42"));
-        assert!(endpoint_pattern_matches("/api/items", "/api/items/42"));
+        // A shorter pattern must NOT be covered by a deeper path.
+        assert!(!endpoint_pattern_matches("/api/items", "/api/items/42"));
         assert!(!endpoint_pattern_matches("/api/items/{id}", "/api/items"));
         assert!(!endpoint_pattern_matches("/api/users", "/api/items"));
     }

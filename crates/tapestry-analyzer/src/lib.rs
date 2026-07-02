@@ -1882,13 +1882,24 @@ fn is_gibberish_path_segment(seg: &str) -> bool {
     if seg.is_empty() {
         return false;
     }
-    // Pure hex hash (webpack chunk IDs, content hashes)
-    if seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Content hash (md5/sha): long hex with at least one letter. The letter
+    // requirement excludes plain numeric IDs (snowflakes, sequential IDs), and
+    // the >=25 threshold excludes 24-char Mongo ObjectIds and shorter IDs, all
+    // of which are legitimate REST resource identifiers we must not drop.
+    if seg.len() >= 25
+        && seg.chars().all(|c| c.is_ascii_hexdigit())
+        && seg.chars().any(|c| c.is_ascii_alphabetic())
+    {
         return true;
     }
-    // URL-percent-encoded payload baked into a path segment
-    if seg.contains('%') && seg.len() >= 16 {
-        return true;
+    // URL-percent-encoded binary payload baked into a path segment. Requires
+    // the segment to be *dominated* by percent-escapes so that ordinary
+    // encoded text (e.g. "New%20York%20Apartments") is not mistaken for one.
+    if seg.len() >= 16 {
+        let pct = seg.matches('%').count();
+        if pct >= 4 && pct * 3 * 2 >= seg.len() {
+            return true;
+        }
     }
     // Base64url-encoded payload: long, mixed-case alphanumeric + '-'/'_'/'='
     // Requires both cases + digits to distinguish from regular slugs like "web-unified-search"
@@ -2142,6 +2153,20 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use tapestry_input::import_har;
+
+    #[test]
+    fn build_hash_filter_keeps_ids_but_drops_content_hashes() {
+        // Legitimate resource identifiers must survive.
+        assert!(!is_gibberish_path_segment("1234567890123456789")); // 19-digit snowflake
+        assert!(!is_gibberish_path_segment("507f1f77bcf86cd799439011")); // 24-hex ObjectId
+        assert!(!is_gibberish_path_segment("New%20York%20Apartments")); // encoded slug
+        assert!(!is_gibberish_path_segment("web-unified-search"));
+        // Real content hashes and dense percent-encoded payloads are noise.
+        assert!(is_gibberish_path_segment(
+            "d41d8cd98f00b204e9800998ecf8427e" // 32-char md5
+        ));
+        assert!(is_gibberish_path_segment("%00%01%02%ff%fe%fd%aa%bb"));
+    }
 
     #[test]
     fn fixture_generates_vertical_slice_tools() {

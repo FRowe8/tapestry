@@ -7,9 +7,48 @@
 
 use anyhow::Result;
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::time::SystemTime;
 
 const PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Per-site cache of the overlaid ToolSpec for the lifetime of a serve
+/// session. The files backing a site do not change across most calls, so
+/// re-reading and re-parsing them on every JSON-RPC request is wasted work.
+/// Cached entries are invalidated when any backing file's mtime changes —
+/// including meta.json, which call_tool rewrites, so health/approval overlays
+/// stay fresh while read-only calls (the bulk of traffic) hit the cache.
+#[derive(Default)]
+pub(crate) struct SpecCache {
+    entries: HashMap<String, (Vec<Option<SystemTime>>, tapestry_core::ToolSpec)>,
+}
+
+impl SpecCache {
+    fn load(&mut self, site: &str) -> Result<tapestry_core::ToolSpec> {
+        let signature = site_signature(site);
+        if let Some((cached, spec)) = self.entries.get(site) {
+            if *cached == signature {
+                return Ok(spec.clone());
+            }
+        }
+        let spec = crate::load_site_spec(site)?;
+        self.entries
+            .insert(site.to_string(), (signature, spec.clone()));
+        Ok(spec)
+    }
+}
+
+fn site_signature(site: &str) -> Vec<Option<SystemTime>> {
+    ["toolspec.json", "approvals.json", "meta.json"]
+        .iter()
+        .map(|name| {
+            std::fs::metadata(crate::site_dir(site).join(name))
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct McpServerConfig {
@@ -23,12 +62,13 @@ pub fn serve(config: McpServerConfig) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let mut cache = SpecCache::default();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&config, &line) {
+        if let Some(response) = handle_line(&config, &mut cache, &line) {
             let mut encoded = serde_json::to_string(&response)?;
             encoded.push('\n');
             out.write_all(encoded.as_bytes())?;
@@ -38,14 +78,18 @@ pub fn serve(config: McpServerConfig) -> Result<()> {
     Ok(())
 }
 
-fn handle_line(config: &McpServerConfig, line: &str) -> Option<Value> {
+fn handle_line(config: &McpServerConfig, cache: &mut SpecCache, line: &str) -> Option<Value> {
     match serde_json::from_str::<Value>(line) {
-        Ok(message) => handle_message(config, &message),
+        Ok(message) => handle_message(config, cache, &message),
         Err(_) => Some(jsonrpc_error(Value::Null, -32700, "Parse error")),
     }
 }
 
-fn handle_message(config: &McpServerConfig, message: &Value) -> Option<Value> {
+fn handle_message(
+    config: &McpServerConfig,
+    cache: &mut SpecCache,
+    message: &Value,
+) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -55,7 +99,7 @@ fn handle_message(config: &McpServerConfig, message: &Value) -> Option<Value> {
         "initialize" => Ok(initialize_result(config, &params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions(config) })),
-        "tools/call" => tools_call(config, &params),
+        "tools/call" => tools_call(config, cache, &params),
         _ => Err((-32601, format!("Method not found: {method}"))),
     };
 
@@ -180,7 +224,11 @@ pub(crate) fn tool_definitions(config: &McpServerConfig) -> Value {
 /// params) become JSON-RPC errors; anything from the runtime — including
 /// structured runtime errors — is returned as tool content so the agent can
 /// read and act on it.
-fn tools_call(config: &McpServerConfig, params: &Value) -> Result<Value, (i64, String)> {
+fn tools_call(
+    config: &McpServerConfig,
+    cache: &mut SpecCache,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err((-32602, "Missing tool name".to_string()));
     };
@@ -205,7 +253,7 @@ fn tools_call(config: &McpServerConfig, params: &Value) -> Result<Value, (i64, S
         Ok(site) => site,
         Err(error) => return Ok(tool_result(error)),
     };
-    let spec = match crate::load_site_spec(&site) {
+    let spec = match cache.load(&site) {
         Ok(spec) => spec,
         Err(_) => {
             return Ok(tool_result(json!({
@@ -357,6 +405,7 @@ mod tests {
     fn initialize_reports_server_info_and_tools_capability() {
         let response = handle_message(
             &config(Some("demo")),
+            &mut SpecCache::default(),
             &request(1, "initialize", json!({ "protocolVersion": "2024-11-05" })),
         )
         .expect("initialize returns a response");
@@ -373,8 +422,12 @@ mod tests {
 
     #[test]
     fn tools_list_exposes_exactly_the_four_runtime_methods() {
-        let response = handle_message(&config(Some("demo")), &request(2, "tools/list", json!({})))
-            .expect("tools/list returns a response");
+        let response = handle_message(
+            &config(Some("demo")),
+            &mut SpecCache::default(),
+            &request(2, "tools/list", json!({})),
+        )
+        .expect("tools/list returns a response");
 
         let tools = response["result"]["tools"]
             .as_array()
@@ -396,8 +449,12 @@ mod tests {
 
     #[test]
     fn unbound_server_requires_site_argument() {
-        let response = handle_message(&config(None), &request(3, "tools/list", json!({})))
-            .expect("tools/list returns a response");
+        let response = handle_message(
+            &config(None),
+            &mut SpecCache::default(),
+            &request(3, "tools/list", json!({})),
+        )
+        .expect("tools/list returns a response");
 
         for tool in response["result"]["tools"].as_array().expect("tools") {
             let required = tool["inputSchema"]["required"]
@@ -414,13 +471,14 @@ mod tests {
     #[test]
     fn notifications_get_no_response() {
         let message = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_message(&config(Some("demo")), &message).is_none());
+        assert!(handle_message(&config(Some("demo")), &mut SpecCache::default(), &message).is_none());
     }
 
     #[test]
     fn unknown_method_returns_method_not_found() {
         let response = handle_message(
             &config(Some("demo")),
+            &mut SpecCache::default(),
             &request(4, "resources/list", json!({})),
         )
         .expect("unknown method with id returns an error response");
@@ -431,6 +489,7 @@ mod tests {
     fn unknown_tool_name_is_a_protocol_error() {
         let response = handle_message(
             &config(Some("demo")),
+            &mut SpecCache::default(),
             &request(5, "tools/call", json!({ "name": "delete_everything" })),
         )
         .expect("response");
@@ -441,6 +500,7 @@ mod tests {
     fn missing_site_produces_structured_tool_error() {
         let response = handle_message(
             &config(None),
+            &mut SpecCache::default(),
             &request(
                 6,
                 "tools/call",
@@ -457,7 +517,8 @@ mod tests {
 
     #[test]
     fn parse_error_returns_jsonrpc_parse_error() {
-        let response = handle_line(&config(Some("demo")), "{not json").expect("response");
+        let response = handle_line(&config(Some("demo")), &mut SpecCache::default(), "{not json")
+            .expect("response");
         assert_eq!(response["error"]["code"], -32700);
     }
 }

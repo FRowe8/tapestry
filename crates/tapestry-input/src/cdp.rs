@@ -211,7 +211,7 @@ fn no_api_traffic_warning() -> String {
 #[derive(Debug, Clone)]
 pub struct CdpObservationBuilder {
     options: CaptureOptions,
-    origin_domain: Option<String>,
+    origin_host: Option<String>,
     next_sequence: usize,
     pending: BTreeMap<String, PendingObservation>,
 }
@@ -219,7 +219,7 @@ pub struct CdpObservationBuilder {
 impl CdpObservationBuilder {
     pub fn new(options: CaptureOptions, origin_url: &str) -> Self {
         Self {
-            origin_domain: host_from_url(origin_url).as_deref().and_then(registrable_domain),
+            origin_host: host_from_url(origin_url).map(|host| host.to_ascii_lowercase()),
             options,
             next_sequence: 0,
             pending: BTreeMap::new(),
@@ -304,11 +304,11 @@ impl CdpObservationBuilder {
 
     pub fn finalize(self) -> Vec<Observation> {
         let include_third_party = self.options.include_third_party;
-        let origin_domain = self.origin_domain.clone();
+        let origin_host = self.origin_host.clone();
         let mut pending = self
             .pending
             .into_values()
-            .filter(|item| include_third_party || item.same_site(&origin_domain))
+            .filter(|item| include_third_party || item.same_site(&origin_host))
             .collect::<Vec<_>>();
         pending.sort_by_key(|item| item.sequence);
         pending
@@ -643,7 +643,7 @@ impl Default for ReauthOptions {
 /// into observations or logs. Only first-party requests are inspected.
 #[derive(Debug, Clone)]
 pub struct CredentialHarvester {
-    origin_domain: Option<String>,
+    origin_host: Option<String>,
     first_party_requests: HashMap<String, bool>,
     credentials: BTreeMap<String, String>,
 }
@@ -651,9 +651,7 @@ pub struct CredentialHarvester {
 impl CredentialHarvester {
     pub fn new(origin_url: &str) -> Self {
         Self {
-            origin_domain: host_from_url(origin_url)
-                .as_deref()
-                .and_then(registrable_domain),
+            origin_host: host_from_url(origin_url).map(|host| host.to_ascii_lowercase()),
             first_party_requests: HashMap::new(),
             credentials: BTreeMap::new(),
         }
@@ -699,11 +697,8 @@ impl CredentialHarvester {
     }
 
     fn is_first_party(&self, url: &str) -> bool {
-        match (
-            &self.origin_domain,
-            host_from_url(url).as_deref().and_then(registrable_domain),
-        ) {
-            (Some(origin), Some(current)) => origin.eq_ignore_ascii_case(&current),
+        match (&self.origin_host, host_from_url(url)) {
+            (Some(origin), Some(current)) => same_site_host(origin, &current),
             _ => false,
         }
     }
@@ -1080,9 +1075,10 @@ struct PendingObservation {
 }
 
 impl PendingObservation {
-    fn same_site(&self, origin_domain: &Option<String>) -> bool {
-        match (origin_domain, host_from_url(&self.url).as_deref().and_then(registrable_domain)) {
-            (Some(origin), Some(current)) => origin.eq_ignore_ascii_case(&current),
+    fn same_site(&self, origin_host: &Option<String>) -> bool {
+        match (origin_host, host_from_url(&self.url)) {
+            (Some(origin), Some(current)) => same_site_host(origin, &current),
+            // Unknown origin: keep, so a capture is never silently emptied.
             _ => true,
         }
     }
@@ -1222,6 +1218,24 @@ fn registrable_domain(host: &str) -> Option<String> {
         2
     };
     Some(parts[parts.len().saturating_sub(n)..].join(".").to_ascii_lowercase())
+}
+
+/// Whether two hosts belong to the same site for first-party filtering.
+///
+/// IP literals and single-label hosts (localhost, intranet names) have no
+/// meaningful registrable domain, so they are compared exactly; everything
+/// else is compared by registrable domain so subdomains count as same-site.
+fn same_site_host(origin_host: &str, other_host: &str) -> bool {
+    let origin = origin_host.to_ascii_lowercase();
+    let other = other_host.to_ascii_lowercase();
+    match (registrable_domain(&origin), registrable_domain(&other)) {
+        (Some(a), Some(b)) if !is_ip_literal(&origin) && !is_ip_literal(&other) => a == b,
+        _ => origin == other,
+    }
+}
+
+fn is_ip_literal(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
 }
 
 fn response_body_should_skip(mime_type: Option<&str>, path: &str) -> bool {
@@ -1636,6 +1650,38 @@ mod tests {
         let credentials = harvester.into_credentials();
         assert_eq!(credentials["Authorization"], "Bearer abc123");
         assert!(!credentials.contains_key("Accept"));
+    }
+
+    #[test]
+    fn harvester_treats_localhost_requests_as_first_party() {
+        // Self-hosted sites live on localhost, which has no registrable domain.
+        let mut harvester = CredentialHarvester::new("http://localhost:3000/login");
+        harvester.ingest_message(&request_event(
+            "1",
+            "http://localhost:3000/api/me",
+            json!({"Authorization": "Bearer local-tok"}),
+        ));
+        // A genuinely different host must still be rejected.
+        harvester.ingest_message(&request_event(
+            "2",
+            "http://127.0.0.1:9000/api/me",
+            json!({"Authorization": "Bearer other"}),
+        ));
+
+        let credentials = harvester.into_credentials();
+        assert_eq!(credentials["Authorization"], "Bearer local-tok");
+    }
+
+    #[test]
+    fn same_site_host_compares_ips_and_localhost_exactly() {
+        assert!(same_site_host("localhost", "localhost"));
+        assert!(!same_site_host("localhost", "127.0.0.1"));
+        assert!(same_site_host("127.0.0.1", "127.0.0.1"));
+        // IP literals must not be collapsed by the registrable-domain heuristic.
+        assert!(!same_site_host("127.0.0.1", "192.168.0.1"));
+        // Real domains still match across subdomains.
+        assert!(same_site_host("www.example.com", "api.example.com"));
+        assert!(!same_site_host("example.com", "evil.com"));
     }
 
     #[test]

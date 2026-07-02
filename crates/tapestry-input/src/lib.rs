@@ -59,24 +59,69 @@ pub fn redact_har(path: impl AsRef<Path>) -> Result<Value> {
 /// Redacting headers and bodies while persisting raw URLs would leak them
 /// into observations, tool examples, and evidence.
 pub(crate) fn is_secret_query_param(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    if matches!(name.as_str(), "sig" | "key") {
-        return true;
-    }
-    [
-        "token", "secret", "password", "api_key", "apikey", "auth", "session", "signature",
+    const SECRET_WORDS: &[&str] = &[
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "auth",
+        "authorization",
+        "key",
+        "apikey",
+        "sig",
+        "signature",
+        "session",
+        "sid",
         "credential",
-    ]
-    .iter()
-    .any(|marker| name.contains(marker))
+        "credentials",
+    ];
+    // Match whole words, not substrings, so benign names like `author`
+    // (contains "auth") or `sortkey` (contains "key") are not redacted.
+    split_identifier_words(name)
+        .iter()
+        .any(|word| SECRET_WORDS.contains(&word.as_str()))
+}
+
+/// Split an identifier into lowercase words on separators and camelCase
+/// boundaries: `access_token` -> [access, token], `apiKey` -> [api, key].
+fn split_identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower_or_digit = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            if prev_lower_or_digit && c.is_ascii_uppercase() && !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            current.push(c.to_ascii_lowercase());
+            prev_lower_or_digit = c.is_ascii_lowercase() || c.is_ascii_digit();
+        } else {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            prev_lower_or_digit = false;
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 /// Replace secret query parameter values in a full URL string.
+///
+/// Returns the URL unchanged when no secret parameter is present, so clean
+/// URLs keep their original byte-for-byte encoding — otherwise re-serializing
+/// (e.g. `%20` -> `+`) would defeat duplicate detection when the same capture
+/// is imported again.
 pub(crate) fn redact_url_query(url: &Url) -> String {
-    if url.query().is_none() {
+    let has_secret = url
+        .query_pairs()
+        .any(|(name, _)| is_secret_query_param(&name));
+    if !has_secret {
         return url.to_string();
     }
-    let mut redacted = url.clone();
     let pairs: Vec<(String, String)> = url
         .query_pairs()
         .map(|(name, value)| {
@@ -88,6 +133,7 @@ pub(crate) fn redact_url_query(url: &Url) -> String {
             (name.to_string(), value)
         })
         .collect();
+    let mut redacted = url.clone();
     {
         let mut serializer = redacted.query_pairs_mut();
         serializer.clear();
@@ -211,6 +257,25 @@ mod tests {
         assert_eq!(query["sig"], "<redacted>");
         assert_eq!(query["limit"], 5);
         assert_eq!(query["q"], "shoes");
+    }
+
+    #[test]
+    fn benign_params_that_contain_secret_substrings_are_not_redacted() {
+        assert!(!is_secret_query_param("author"));
+        assert!(!is_secret_query_param("sortkey"));
+        assert!(!is_secret_query_param("keyword"));
+        assert!(!is_secret_query_param("userId"));
+        assert!(is_secret_query_param("access_token"));
+        assert!(is_secret_query_param("apiKey"));
+        assert!(is_secret_query_param("x-api-key"));
+        assert!(is_secret_query_param("sessionId"));
+    }
+
+    #[test]
+    fn clean_url_query_is_not_re_encoded() {
+        // No secret present: bytes must be preserved so re-import dedup works.
+        let url = Url::parse("http://x.test/api?q=a%20b&sort=name").unwrap();
+        assert_eq!(redact_url_query(&url), url.to_string());
     }
 }
 
