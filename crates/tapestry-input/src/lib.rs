@@ -7,7 +7,8 @@ use url::Url;
 mod cdp;
 
 pub use cdp::{
-    record, CaptureOptions, CaptureSummary, CdpObservationBuilder, RecordOptions, RecordResult,
+    reauth, record, resolve_browser, CaptureOptions, CaptureSummary, CdpObservationBuilder,
+    CredentialHarvester, ReauthOptions, RecordOptions, RecordResult,
 };
 
 const MAX_HAR_BYTES: u64 = 200 * 1024 * 1024;
@@ -54,6 +55,62 @@ pub fn redact_har(path: impl AsRef<Path>) -> Result<Value> {
     Ok(json)
 }
 
+/// Secrets also travel in query strings (`?access_token=…`, `?sig=…`).
+/// Redacting headers and bodies while persisting raw URLs would leak them
+/// into observations, tool examples, and evidence.
+pub(crate) fn is_secret_query_param(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if matches!(name.as_str(), "sig" | "key") {
+        return true;
+    }
+    [
+        "token", "secret", "password", "api_key", "apikey", "auth", "session", "signature",
+        "credential",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
+}
+
+/// Replace secret query parameter values in a full URL string.
+pub(crate) fn redact_url_query(url: &Url) -> String {
+    if url.query().is_none() {
+        return url.to_string();
+    }
+    let mut redacted = url.clone();
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(name, value)| {
+            let value = if is_secret_query_param(&name) {
+                "<redacted>".to_string()
+            } else {
+                value.to_string()
+            };
+            (name.to_string(), value)
+        })
+        .collect();
+    {
+        let mut serializer = redacted.query_pairs_mut();
+        serializer.clear();
+        for (name, value) in &pairs {
+            serializer.append_pair(name, value);
+        }
+    }
+    redacted.to_string()
+}
+
+pub(crate) fn redacted_query_map(url: &Url) -> BTreeMap<String, Value> {
+    let mut query = BTreeMap::new();
+    for (name, value) in url.query_pairs() {
+        let value = if is_secret_query_param(&name) {
+            Value::String("<redacted>".to_string())
+        } else {
+            infer_scalar(value.as_ref())
+        };
+        query.insert(name.to_string(), value);
+    }
+    query
+}
+
 fn parse_entry(entry: &Value) -> Option<Observation> {
     let request = entry.get("request")?;
     let response = entry.get("response");
@@ -67,11 +124,8 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
         return None;
     }
     let path = url.path().to_string();
-
-    let mut query = BTreeMap::new();
-    for (k, v) in url.query_pairs() {
-        query.insert(k.to_string(), infer_scalar(v.as_ref()));
-    }
+    let query = redacted_query_map(&url);
+    let url_str = redact_url_query(&url);
 
     let request_headers = parse_headers(request.get("headers"));
     let response_headers = response
@@ -125,6 +179,38 @@ mod tests {
         assert!(!observations.is_empty());
         assert!(observations.iter().all(|obs| !obs.method.is_empty()));
         assert!(observations.iter().all(|obs| obs.url.starts_with("http")));
+    }
+
+    #[test]
+    fn no_seeded_secret_survives_har_import() {
+        let observations = import_har("../../examples/fixtures/redaction.har").unwrap();
+        let serialized = serde_json::to_string(&observations).unwrap();
+
+        assert!(
+            !serialized.contains("FAKESECRET"),
+            "a seeded secret leaked into observations: {serialized}"
+        );
+        // Redaction must not have destroyed the useful payload.
+        assert!(serialized.contains("\"title\":\"One\""));
+        assert!(serialized.contains("access_token"));
+        assert!(serialized.contains("\"limit\":5"));
+    }
+
+    #[test]
+    fn secret_query_params_are_redacted_in_url_and_query_map() {
+        let url =
+            Url::parse("http://x.test/api?access_token=tok123&limit=5&sig=abc&q=shoes").unwrap();
+        let redacted_url = redact_url_query(&url);
+        assert!(!redacted_url.contains("tok123"));
+        assert!(!redacted_url.contains("sig=abc"));
+        assert!(redacted_url.contains("limit=5"));
+        assert!(redacted_url.contains("q=shoes"));
+
+        let query = redacted_query_map(&url);
+        assert_eq!(query["access_token"], "<redacted>");
+        assert_eq!(query["sig"], "<redacted>");
+        assert_eq!(query["limit"], 5);
+        assert_eq!(query["q"], "shoes");
     }
 }
 
