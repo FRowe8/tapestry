@@ -1,7 +1,12 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::{collections::{BTreeMap, BTreeSet}, fs, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    time::Duration,
+};
 use tapestry_core::{
     ResourceKind, RuntimeErrorResponse, SafetyClassification, ToolDefinition, ToolSpec,
 };
@@ -831,7 +836,8 @@ fn handle_http_response(
         "data": data,
         "execution": { "mode": "live" }
     });
-    if let Some(conformance) = response_field_compatibility(&response["data"], &tool.response_schema)
+    if let Some(conformance) =
+        response_field_compatibility(&response["data"], &tool.response_schema)
     {
         response["conformance"] = json!({
             "field_compatibility": conformance.compatibility,
@@ -1053,10 +1059,32 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
         .to_ascii_lowercase();
     let warnings = tool.warnings.join(" ").to_ascii_lowercase();
     let resource_keywords = resource_search_keywords(&tool.resource_kind);
+    // Whole-word matches must dominate: an exact resource-noun hit ("users"
+    // -> list_users) is stronger evidence than any category or intent boost,
+    // otherwise generic boosts push unrelated tools above the obvious match.
+    let name_segments: Vec<&str> = name
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|seg| !seg.is_empty())
+        .collect();
+    let path_segments: Vec<String> = path
+        .split('/')
+        .filter(|seg| !seg.is_empty() && !seg.starts_with('{'))
+        .map(str::to_ascii_lowercase)
+        .collect();
     let term_match_score: i32 = tokens
         .iter()
         .map(|token| {
-            if name.contains(token) {
+            if name_segments
+                .iter()
+                .any(|seg| token_matches_word(token, seg))
+            {
+                30
+            } else if path_segments
+                .iter()
+                .any(|seg| token_matches_word(token, seg))
+            {
+                20
+            } else if name.contains(token) {
                 12
             } else if description.contains(token) {
                 6
@@ -1123,6 +1151,21 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
     }
 
     raw_score
+}
+
+/// Whole-word token comparison with naive plural folding, so "users" matches
+/// the `users` segment of `list_users` and "phone" matches "phones", without
+/// substring false positives like "for" in "format".
+fn token_matches_word(token: &str, word: &str) -> bool {
+    if token == word {
+        return true;
+    }
+    if token.len() < 3 || word.len() < 3 {
+        return false;
+    }
+    let token_singular = token.strip_suffix('s').unwrap_or(token);
+    let word_singular = word.strip_suffix('s').unwrap_or(word);
+    token_singular == word_singular
 }
 
 fn is_framework_path(path: &str) -> bool {
@@ -1457,8 +1500,8 @@ mod tests {
             .expect("comparable");
         assert_eq!(full.compatibility, 1.0);
 
-        let half = response_field_compatibility(&json!([{"id":1}]), &array_schema)
-            .expect("comparable");
+        let half =
+            response_field_compatibility(&json!([{"id":1}]), &array_schema).expect("comparable");
         assert_eq!(half.compatibility, 0.5);
         assert_eq!(half.missing_fields, vec!["name".to_string()]);
 
@@ -1935,6 +1978,74 @@ mod tests {
         assert_eq!(results[0].name, "list_items");
         assert_eq!(evidence["status"], "success");
         assert_eq!(evidence["evidence"][0]["source"], "har");
+    }
+
+    #[test]
+    fn exact_resource_match_beats_category_boosts() {
+        // Reproduces the dummyjson corpus failure: "list users" ranked
+        // list_products/list_categories (CommerceApi boosts) above list_users,
+        // because an exact name-token match scored below generic boosts.
+        let mut products = tool(
+            "list_products",
+            "GET",
+            "/products",
+            true,
+            SafetyClassification::Read,
+        );
+        products.resource_kind = ResourceKind::CommerceApi;
+        products.description = "Observed GET endpoint /products".to_string();
+        let mut categories = tool(
+            "list_categories",
+            "GET",
+            "/products/categories",
+            true,
+            SafetyClassification::Read,
+        );
+        categories.resource_kind = ResourceKind::CommerceApi;
+        let users = tool(
+            "list_users",
+            "GET",
+            "/users",
+            true,
+            SafetyClassification::Read,
+        );
+        let spec = spec_with_base("http://127.0.0.1:1", vec![products, categories, users]);
+
+        let results = search_tools(&spec, "list users", 3);
+
+        assert_eq!(results[0].name, "list_users");
+    }
+
+    #[test]
+    fn search_tool_named_after_resource_wins_search_query() {
+        let mut products = tool(
+            "list_products",
+            "GET",
+            "/products",
+            true,
+            SafetyClassification::Read,
+        );
+        products.resource_kind = ResourceKind::CommerceApi;
+        let mut search = tool(
+            "search_products",
+            "GET",
+            "/products/search",
+            true,
+            SafetyClassification::Read,
+        );
+        search.resource_kind = ResourceKind::CommerceApi;
+        let categories = tool(
+            "list_categories",
+            "GET",
+            "/products/categories",
+            true,
+            SafetyClassification::Read,
+        );
+        let spec = spec_with_base("http://127.0.0.1:1", vec![products, search, categories]);
+
+        let results = search_tools(&spec, "search for phones", 3);
+
+        assert_eq!(results[0].name, "search_products");
     }
 
     #[test]

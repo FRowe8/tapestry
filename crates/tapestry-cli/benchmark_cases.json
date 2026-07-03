@@ -94,6 +94,6 @@
     "site": "rightmove",
     "task": "Search for properties",
     "expected_outcome": "missing_required_argument",
-    "expected_tool": "list_search"
+    "expected_tool": "search_listing"
   }
 ]

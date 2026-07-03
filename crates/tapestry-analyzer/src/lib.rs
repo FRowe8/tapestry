@@ -473,7 +473,10 @@ fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) ->
         .ok()
         .and_then(|url| url.host_str().map(|h| h.to_ascii_lowercase()));
     if let Some(h) = host.as_deref() {
-        if KNOWN_NOISE_HOSTS.iter().any(|noise| *noise == h || h.ends_with(&format!(".{noise}"))) {
+        if KNOWN_NOISE_HOSTS
+            .iter()
+            .any(|noise| *noise == h || h.ends_with(&format!(".{noise}")))
+        {
             return SignalDecision {
                 keep: false,
                 score: -100,
@@ -1569,12 +1572,28 @@ fn tool_name(
         return "opaque_root_post".to_string();
     }
 
-    let resource = path
+    let segments: Vec<&str> = path
         .trim_matches('/')
         .split('/')
         .filter(|seg| !seg.starts_with('{') && !is_version(seg) && *seg != "api")
-        .last()
-        .unwrap_or("tool");
+        .collect();
+    let resource = segments.last().copied().unwrap_or("tool");
+
+    // A trailing search verb is the operation, not the resource: GET
+    // /products/search reads as "search products", and naming it that way
+    // also gives tool search a resource token to match on.
+    const SEARCH_VERBS: &[&str] = &["search", "suggest", "autocomplete", "find", "lookup"];
+    if method == "GET" && SEARCH_VERBS.contains(&resource) {
+        if let Some(noun) = segments
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|seg| !SEARCH_VERBS.contains(seg))
+        {
+            return normalize_identifier(&format!("search_{noun}"));
+        }
+    }
+
     let singular = resource.trim_end_matches('s');
     let prefix = match method {
         "GET" => {
@@ -2166,6 +2185,25 @@ mod tests {
             "d41d8cd98f00b204e9800998ecf8427e" // 32-char md5
         ));
         assert!(is_gibberish_path_segment("%00%01%02%ff%fe%fd%aa%bb"));
+    }
+
+    #[test]
+    fn trailing_search_verb_names_tool_after_resource() {
+        assert_eq!(
+            tool_name("GET", "/products/search", "", &[]),
+            "search_products"
+        );
+        assert_eq!(
+            tool_name("GET", "/api/property-search/listing/search", "", &[]),
+            "search_listing"
+        );
+        // No resource noun before the verb: fall back to the generic scheme.
+        assert_eq!(tool_name("GET", "/search", "", &[]), "list_search");
+        // Non-GET methods keep their action prefix.
+        assert_eq!(
+            tool_name("POST", "/products/search", "", &[]),
+            "create_search"
+        );
     }
 
     #[test]
