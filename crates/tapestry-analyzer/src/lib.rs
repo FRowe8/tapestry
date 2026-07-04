@@ -1009,7 +1009,7 @@ fn schema_for_values_depth(
     }
 
     if enum_candidates {
-        maybe_insert_default(&mut schema, values);
+        maybe_insert_default(field, &mut schema, values);
         maybe_insert_enum(&mut schema, values);
     }
 
@@ -1084,7 +1084,13 @@ fn infer_object_schema_depth(
     })
 }
 
-fn maybe_insert_default(schema: &mut Value, values: &[Value]) {
+fn maybe_insert_default(field: &str, schema: &mut Value, values: &[Value]) {
+    // A pagination position observed in the capture is where the user
+    // happened to be, not a default: an agent that inherits skip=10 silently
+    // misses the first page and has no way to notice.
+    if is_pagination_position_param(field) {
+        return;
+    }
     let non_null: Vec<&Value> = values.iter().filter(|value| !value.is_null()).collect();
     let Some(first) = non_null.first() else {
         return;
@@ -1094,6 +1100,23 @@ fn maybe_insert_default(schema: &mut Value, values: &[Value]) {
             obj.insert("default".to_string(), (*first).clone());
         }
     }
+}
+
+/// Parameters that name a position in a result set (as opposed to a page
+/// *size* like `limit`, which is a legitimate default). Matched on identifier
+/// words so `pageCursor` and `start_index` count too.
+fn is_pagination_position_param(field: &str) -> bool {
+    let name = field
+        .rsplit('.')
+        .next()
+        .unwrap_or(field)
+        .trim_end_matches("[]");
+    normalize_identifier(name).split('_').any(|word| {
+        matches!(
+            word,
+            "skip" | "offset" | "start" | "page" | "cursor" | "after" | "before" | "from"
+        )
+    })
 }
 
 fn maybe_insert_enum(schema: &mut Value, values: &[Value]) {
@@ -2185,6 +2208,24 @@ mod tests {
             "d41d8cd98f00b204e9800998ecf8427e" // 32-char md5
         ));
         assert!(is_gibberish_path_segment("%00%01%02%ff%fe%fd%aa%bb"));
+    }
+
+    #[test]
+    fn pagination_positions_never_become_defaults() {
+        // A captured skip=10 is where the user happened to be, not a default;
+        // an agent inheriting it silently misses the first page.
+        let mut skip = json!({"type":"integer"});
+        maybe_insert_default("skip", &mut skip, &[json!(10)]);
+        assert!(skip.get("default").is_none());
+
+        let mut cursor = json!({"type":"string"});
+        maybe_insert_default("body.pageCursor", &mut cursor, &[json!("abc")]);
+        assert!(cursor.get("default").is_none());
+
+        // Page *size* stays a legitimate default.
+        let mut limit = json!({"type":"integer"});
+        maybe_insert_default("limit", &mut limit, &[json!(5)]);
+        assert_eq!(limit["default"], json!(5));
     }
 
     #[test]

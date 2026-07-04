@@ -327,37 +327,7 @@ fn redact_body_text(text: &str) -> String {
 }
 
 fn redact_body_value(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, val)| {
-                    if is_secret_body_key(&key) {
-                        (key, Value::String("<redacted>".to_string()))
-                    } else {
-                        (key, redact_body_value(val))
-                    }
-                })
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.into_iter().map(redact_body_value).collect()),
-        other => other,
-    }
-}
-
-fn is_secret_body_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    [
-        "token",
-        "access_token",
-        "refresh_token",
-        "authorization",
-        "cookie",
-        "password",
-        "secret",
-        "api_key",
-    ]
-    .iter()
-    .any(|secret| key == *secret || key.contains(secret))
+    tapestry_core::redact_sensitive_fields(value)
 }
 
 fn redact_headers_in_place(headers: &mut [Value]) {

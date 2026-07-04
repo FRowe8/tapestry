@@ -171,3 +171,44 @@ pub struct RuntimeErrorResponse {
     pub details: Option<Value>,
     pub http_status: Option<u16>,
 }
+
+/// Field names whose values are treated as secrets wherever a JSON body is
+/// persisted or handed to an agent. Shared by the import redaction and the
+/// runtime's live-response masking so stored examples and live payloads
+/// cannot disagree about what is sensitive.
+pub fn is_secret_field_name(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "token",
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "cookie",
+        "password",
+        "secret",
+        "api_key",
+    ]
+    .iter()
+    .any(|secret| key == *secret || key.contains(secret))
+}
+
+/// Recursively replace values of secret-named fields with `<redacted>`.
+pub fn redact_sensitive_fields(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, val)| {
+                    if is_secret_field_name(&key) {
+                        (key, Value::String("<redacted>".to_string()))
+                    } else {
+                        (key, redact_sensitive_fields(val))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_sensitive_fields).collect())
+        }
+        other => other,
+    }
+}

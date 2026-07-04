@@ -280,6 +280,31 @@ pub fn get_tool_schema(spec: &ToolSpec, tool_id: &str) -> Option<Value> {
         .map(|tool| {
             let mut value = serde_json::to_value(tool).expect("ToolDefinition serializes");
             compact_schema_response(&mut value);
+            if let Some(map) = value.as_object_mut() {
+                // The call-time envelope key is `arguments`, which nothing in
+                // the tool's own schema would tell an agent (`input_schema`
+                // invites guessing `input`). Say it here, before the mistake.
+                map.insert(
+                    "how_to_call".to_string(),
+                    Value::String(format!(
+                        "call_tool {{\"tool_id\": \"{}\", \"arguments\": {{...}}}} \
+                         where arguments matches input_schema",
+                        tool.id
+                    )),
+                );
+                if !tool.approved {
+                    let reasons = approval_pending_reasons(tool, DEFAULT_CONFIDENCE_THRESHOLD);
+                    if !reasons.is_empty() {
+                        map.insert(
+                            "approval_pending".to_string(),
+                            Value::String(format!(
+                                "Calling this tool will fail until the user approves it: {}.",
+                                reasons.join(", and ")
+                            )),
+                        );
+                    }
+                }
+            }
             value
         })
 }
@@ -555,19 +580,11 @@ pub fn call_tool_dry_run(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Va
     })
 }
 
-fn enforce_approval(
-    site: &str,
-    tool: &ToolDefinition,
-    tool_id: &str,
-    threshold: f64,
-) -> Option<Value> {
-    if tool.approved {
-        return None;
-    }
-
-    // Report every applicable reason, not just the first: a low-confidence
-    // write tool blocked with only "confidence below threshold" reads as a
-    // tuning problem when the real gate is the write classification.
+/// Why an unapproved tool will be blocked at execution time. Reports every
+/// applicable reason, not just the first: a low-confidence write tool blocked
+/// with only "confidence below threshold" reads as a tuning problem when the
+/// real gate is the write classification.
+fn approval_pending_reasons(tool: &ToolDefinition, threshold: f64) -> Vec<String> {
     let mut reasons = Vec::new();
     match tool.safety.classification {
         SafetyClassification::Write => reasons.push("it is classified as a write tool".to_string()),
@@ -582,6 +599,20 @@ fn enforce_approval(
             tool.confidence.overall, threshold
         ));
     }
+    reasons
+}
+
+fn enforce_approval(
+    site: &str,
+    tool: &ToolDefinition,
+    tool_id: &str,
+    threshold: f64,
+) -> Option<Value> {
+    if tool.approved {
+        return None;
+    }
+
+    let reasons = approval_pending_reasons(tool, threshold);
     if reasons.is_empty() {
         return None;
     }
@@ -896,7 +927,10 @@ fn handle_http_response(
     if !(200..=299).contains(&status) {
         return Ok(handle_error_status(status, body, tool));
     }
-    let data = parse_response_body(body)?;
+    // Live payloads get the same secret-field masking as stored examples:
+    // the capture pipeline redacts what it persists, and an agent's context
+    // window is no safer a place for a session token than a JSON file.
+    let data = tapestry_core::redact_sensitive_fields(parse_response_body(body)?);
     if !response_matches_schema(&data, &tool.response_schema) {
         return Ok(runtime_error(
             "schema_mismatch",
@@ -976,18 +1010,27 @@ fn handle_error_status(status: u16, body: Option<String>, tool: &ToolDefinition)
             Some("retry_later"),
             Some(status),
         ),
-        _ => runtime_error(
-            "endpoint_error",
-            status >= 500,
-            &format!("Endpoint returned HTTP {status}"),
-            json!({
-                "tool_id": tool.id,
-                "status_code": status,
-                "body": body.unwrap_or_default().chars().take(200).collect::<String>()
-            }),
-            None,
-            Some(status),
-        ),
+        _ => {
+            // Error bodies can echo credentials back (e.g. "invalid token:
+            // ..."); mask JSON fields before quoting the snippet.
+            let body = body.unwrap_or_default();
+            let snippet = match serde_json::from_str::<Value>(&body) {
+                Ok(json) => tapestry_core::redact_sensitive_fields(json).to_string(),
+                Err(_) => body,
+            };
+            runtime_error(
+                "endpoint_error",
+                status >= 500,
+                &format!("Endpoint returned HTTP {status}"),
+                json!({
+                    "tool_id": tool.id,
+                    "status_code": status,
+                    "body": snippet.chars().take(200).collect::<String>()
+                }),
+                None,
+                Some(status),
+            )
+        }
     }
 }
 
@@ -2087,6 +2130,61 @@ mod tests {
         assert_eq!(results[0].name, "list_items");
         assert_eq!(evidence["status"], "success");
         assert_eq!(evidence["evidence"][0]["source"], "har");
+    }
+
+    #[test]
+    fn live_response_masks_secret_fields() {
+        // Stored examples are redacted at import; the live payload handed to
+        // an agent must not disagree about what is sensitive.
+        let server = MockServer::new(vec![MockResponse::ok(
+            json!({"name":"Emily","password":"emilyspass","profile":{"api_key":"k-123"}}),
+        )]);
+        let read_tool = tool(
+            "get_user",
+            "GET",
+            "/api/user",
+            true,
+            SafetyClassification::Read,
+        );
+        let spec = spec_with_base(&server.base_url(), vec![read_tool]);
+
+        let response = call_tool_with_options(&spec, "get_user", json!({}), &live_options());
+
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["data"]["name"], "Emily");
+        assert_eq!(response["data"]["password"], "<redacted>");
+        assert_eq!(response["data"]["profile"]["api_key"], "<redacted>");
+    }
+
+    #[test]
+    fn schema_response_carries_call_shape_and_pending_approval() {
+        let mut create = tool(
+            "create_item",
+            "POST",
+            "/api/items",
+            false,
+            SafetyClassification::Write,
+        );
+        create.approved = false;
+        let approved_read = tool(
+            "list_items",
+            "GET",
+            "/api/items",
+            true,
+            SafetyClassification::Read,
+        );
+        let spec = spec_with_base("http://127.0.0.1:1", vec![create, approved_read]);
+
+        let blocked = get_tool_schema(&spec, "create_item").unwrap();
+        let how_to_call = blocked["how_to_call"].as_str().expect("how_to_call");
+        assert!(how_to_call.contains("\"arguments\""));
+        let pending = blocked["approval_pending"].as_str().expect("pending note");
+        assert!(pending.contains("write tool"));
+
+        // Approved tools carry the call shape but no approval warning.
+        let ready = get_tool_schema(&spec, "list_items").unwrap();
+        assert!(ready.get("how_to_call").is_some());
+        assert!(ready.get("approval_pending").is_none());
     }
 
     #[test]

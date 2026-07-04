@@ -36,6 +36,8 @@ Secrets are stripped before any observation is persisted, on both the HAR and CD
 
 This is enforced by a test suite built on `examples/fixtures/redaction.har`, a capture seeded with sentinel secrets in every channel; tests assert no sentinel survives into observations, ToolSpecs, review/diagnose reports, or agent trace output. The one deliberate exception: `credentials from-har` and `reauth` extract secrets *into* the credentials store, which is the protected file above.
 
+Live responses get the same treatment: `call_tool` masks secret-named JSON fields (and JSON error-body snippets) before returning data, so a live payload and a stored example can never disagree about what is sensitive. An agent's context window is no safer a place for a session token than a JSON file on disk. This is field-name-based masking, not value detection — a secret stored under an innocuous field name will pass through.
+
 ## Safety classification
 
 Tools are classified as:
