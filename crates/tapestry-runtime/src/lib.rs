@@ -392,7 +392,9 @@ pub fn call_tool_with_options(
         );
     };
 
-    if let Some(error) = enforce_approval(tool, tool_id, options.confidence_threshold) {
+    if let Some(error) =
+        enforce_approval(&spec.site.name, tool, tool_id, options.confidence_threshold)
+    {
         return error;
     }
 
@@ -526,7 +528,9 @@ pub fn call_tool_dry_run(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Va
             None,
         );
     };
-    if let Some(err) = enforce_approval(tool, tool_id, DEFAULT_CONFIDENCE_THRESHOLD) {
+    if let Some(err) =
+        enforce_approval(&spec.site.name, tool, tool_id, DEFAULT_CONFIDENCE_THRESHOLD)
+    {
         return err;
     }
     let Some(args) = arguments.as_object() else {
@@ -551,41 +555,58 @@ pub fn call_tool_dry_run(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Va
     })
 }
 
-fn enforce_approval(tool: &ToolDefinition, tool_id: &str, threshold: f64) -> Option<Value> {
-    if tool.safety.classification == SafetyClassification::Unknown && !tool.approved {
-        return Some(runtime_error(
-            "approval_required",
-            false,
-            "Tool safety is unknown and requires explicit approval",
-            json!({ "tool_id": tool_id, "safety": tool.safety.classification }),
-            Some("approval_required"),
-            None,
-        ));
+fn enforce_approval(
+    site: &str,
+    tool: &ToolDefinition,
+    tool_id: &str,
+    threshold: f64,
+) -> Option<Value> {
+    if tool.approved {
+        return None;
     }
 
-    if tool.confidence.overall < threshold && !tool.approved {
-        return Some(runtime_error(
-            "approval_required",
-            false,
-            "Tool confidence is below the execution threshold",
-            json!({ "tool_id": tool_id, "confidence": tool.confidence.overall, "threshold": threshold }),
-            Some("approval_required"),
-            None,
+    // Report every applicable reason, not just the first: a low-confidence
+    // write tool blocked with only "confidence below threshold" reads as a
+    // tuning problem when the real gate is the write classification.
+    let mut reasons = Vec::new();
+    match tool.safety.classification {
+        SafetyClassification::Write => reasons.push("it is classified as a write tool".to_string()),
+        SafetyClassification::Unknown => {
+            reasons.push("its safety classification is unknown".to_string())
+        }
+        SafetyClassification::Read => {}
+    }
+    if tool.confidence.overall < threshold {
+        reasons.push(format!(
+            "its confidence ({:.2}) is below the execution threshold ({:.2})",
+            tool.confidence.overall, threshold
         ));
     }
-
-    if tool.safety.classification != SafetyClassification::Read && !tool.approved {
-        return Some(runtime_error(
-            "approval_required",
-            false,
-            "Tool requires approval before execution",
-            json!({ "tool_id": tool_id, "safety": tool.safety.classification }),
-            Some("approval_required"),
-            None,
-        ));
+    if reasons.is_empty() {
+        return None;
     }
 
-    None
+    // Agents relay error text to the user, so the text must carry the fix.
+    let message = format!(
+        "Tool '{tool_id}' requires approval before it can execute: {}. \
+         Ask the user to run `tapestry approve {site} {tool_id}` \
+         (or `tapestry approve {site} --list` to review what is pending).",
+        reasons.join(", and ")
+    );
+    Some(runtime_error(
+        "approval_required",
+        false,
+        &message,
+        json!({
+            "tool_id": tool_id,
+            "safety": tool.safety.classification,
+            "confidence": tool.confidence.overall,
+            "threshold": threshold,
+            "fix": format!("tapestry approve {site} {tool_id}"),
+        }),
+        Some("approval_required"),
+        None,
+    ))
 }
 
 fn validate_arguments(
@@ -1692,6 +1713,39 @@ mod tests {
 
         assert_eq!(response["status"], "error");
         assert_eq!(response["error_type"], "approval_required");
+    }
+
+    #[test]
+    fn approval_error_names_the_real_reason_and_the_fix() {
+        // A low-confidence write tool must be reported as a write tool, not
+        // as a confidence problem, and the message must carry the command
+        // that unblocks it (agents relay error text to the user).
+        let mut create = tool(
+            "create_item",
+            "POST",
+            "/api/items",
+            false,
+            SafetyClassification::Write,
+        );
+        create.approved = false;
+        create.confidence.overall = 0.3;
+        let spec = spec_with_base("http://127.0.0.1:1", vec![create]);
+
+        let response =
+            call_tool_with_options(&spec, "create_item", json!({"name":"A"}), &live_options());
+
+        assert_eq!(response["error_type"], "approval_required");
+        let message = response["message"].as_str().expect("message");
+        assert!(message.contains("write tool"), "names the safety gate");
+        assert!(message.contains("confidence"), "names the confidence gate");
+        assert!(
+            message.contains("tapestry approve test create_item"),
+            "message carries the fix command: {message}"
+        );
+        assert_eq!(
+            response["details"]["fix"],
+            json!("tapestry approve test create_item")
+        );
     }
 
     #[test]

@@ -249,6 +249,31 @@ fn tools_call(
         return Err((-32602, format!("Unknown tool: {name}")));
     }
 
+    // Reject unrecognized keys instead of silently ignoring them: a model
+    // that sends `args` instead of `arguments` would otherwise execute the
+    // call with defaults it never chose, and the resulting "missing required
+    // argument" error points at the wrong problem.
+    let allowed: &[&str] = match name {
+        "search_tools" => &["site", "query", "limit"],
+        "call_tool" => &["site", "tool_id", "arguments"],
+        _ => &["site", "tool_id"],
+    };
+    let unknown: Vec<&str> = args
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !allowed.contains(key))
+        .collect();
+    if !unknown.is_empty() {
+        return Err((
+            -32602,
+            format!(
+                "Unknown parameter(s) for {name}: {}. Expected only: {}.",
+                unknown.join(", "),
+                allowed.join(", ")
+            ),
+        ));
+    }
+
     let site = match resolve_site(config, args) {
         Ok(site) => site,
         Err(error) => return Ok(tool_result(error)),
@@ -298,15 +323,13 @@ fn tools_call(
         }
         "call_tool" => {
             let tool_id = required_tool_id(args)?;
-            let arguments = args
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let arguments = args.get("arguments").cloned().unwrap_or_else(|| json!({}));
             let mut options =
                 crate::runtime_options_for(&spec, config.max_pages, config.live, config.offline);
             options.credentials = crate::load_site_credentials(&site)
                 .map_err(|error| (-32603, format!("failed to load credentials: {error}")))?;
-            let value = tapestry_runtime::call_tool_with_options(&spec, tool_id, arguments, &options);
+            let value =
+                tapestry_runtime::call_tool_with_options(&spec, tool_id, arguments, &options);
             crate::record_tool_health(&site, &spec, tool_id, &value);
             value
         }
@@ -431,16 +454,19 @@ mod tests {
         )
         .expect("tools/list returns a response");
 
-        let tools = response["result"]["tools"]
-            .as_array()
-            .expect("tools array");
+        let tools = response["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(
             names,
-            vec!["search_tools", "get_tool_schema", "call_tool", "get_evidence"]
+            vec![
+                "search_tools",
+                "get_tool_schema",
+                "call_tool",
+                "get_evidence"
+            ]
         );
         // Bound server: site stays optional.
         let required = tools[0]["inputSchema"]["required"]
@@ -473,7 +499,9 @@ mod tests {
     #[test]
     fn notifications_get_no_response() {
         let message = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert!(handle_message(&config(Some("demo")), &mut SpecCache::default(), &message).is_none());
+        assert!(
+            handle_message(&config(Some("demo")), &mut SpecCache::default(), &message).is_none()
+        );
     }
 
     #[test]
@@ -499,6 +527,30 @@ mod tests {
     }
 
     #[test]
+    fn unknown_parameter_is_rejected_with_expected_keys() {
+        // A model that sends `args` instead of `arguments` must get a
+        // correction, not a silent call with default arguments.
+        let response = handle_message(
+            &config(Some("demo")),
+            &mut SpecCache::default(),
+            &request(
+                7,
+                "tools/call",
+                json!({
+                    "name": "call_tool",
+                    "arguments": { "tool_id": "tool_x", "args": { "limit": 3 } }
+                }),
+            ),
+        )
+        .expect("response");
+
+        assert_eq!(response["error"]["code"], -32602);
+        let message = response["error"]["message"].as_str().expect("message");
+        assert!(message.contains("args"));
+        assert!(message.contains("arguments"));
+    }
+
+    #[test]
     fn missing_site_produces_structured_tool_error() {
         let response = handle_message(
             &config(None),
@@ -519,8 +571,12 @@ mod tests {
 
     #[test]
     fn parse_error_returns_jsonrpc_parse_error() {
-        let response = handle_line(&config(Some("demo")), &mut SpecCache::default(), "{not json")
-            .expect("response");
+        let response = handle_line(
+            &config(Some("demo")),
+            &mut SpecCache::default(),
+            "{not json",
+        )
+        .expect("response");
         assert_eq!(response["error"]["code"], -32700);
     }
 }
