@@ -277,7 +277,62 @@ pub fn get_tool_schema(spec: &ToolSpec, tool_id: &str) -> Option<Value> {
     spec.tools
         .iter()
         .find(|tool| matches_tool(tool, tool_id))
-        .map(|tool| serde_json::to_value(tool).expect("ToolDefinition serializes"))
+        .map(|tool| {
+            let mut value = serde_json::to_value(tool).expect("ToolDefinition serializes");
+            compact_schema_response(&mut value);
+            value
+        })
+}
+
+/// Trim the parts of a schema response that don't help an agent make its
+/// next call. Full example payloads dominate the serialized ToolDefinition
+/// (often >80% of it) and evidence has its own meta-tool; leaving them here
+/// would spend the token budget the meta-tool design exists to protect.
+fn compact_schema_response(value: &mut Value) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    map.remove("evidence");
+    if let Some(example) = map.get_mut("example_response") {
+        if truncate_example_value(example) {
+            map.insert("example_response_truncated".to_string(), Value::Bool(true));
+        }
+    }
+}
+
+/// Recursively shrink an example payload while preserving its shape: arrays
+/// keep their first element, long strings are capped. Returns true if
+/// anything was trimmed.
+fn truncate_example_value(value: &mut Value) -> bool {
+    const MAX_STRING_LEN: usize = 120;
+    match value {
+        Value::Array(items) => {
+            let mut truncated = items.len() > 1;
+            items.truncate(1);
+            for item in items.iter_mut() {
+                truncated |= truncate_example_value(item);
+            }
+            truncated
+        }
+        Value::Object(map) => {
+            let mut truncated = false;
+            for item in map.values_mut() {
+                truncated |= truncate_example_value(item);
+            }
+            truncated
+        }
+        Value::String(text) => {
+            if text.chars().count() > MAX_STRING_LEN {
+                let mut clipped: String = text.chars().take(MAX_STRING_LEN).collect();
+                clipped.push('…');
+                *text = clipped;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
 }
 
 pub fn get_evidence(spec: &ToolSpec, tool_id: &str) -> Value {
@@ -1978,6 +2033,46 @@ mod tests {
         assert_eq!(results[0].name, "list_items");
         assert_eq!(evidence["status"], "success");
         assert_eq!(evidence["evidence"][0]["source"], "har");
+    }
+
+    #[test]
+    fn get_tool_schema_compacts_example_and_strips_evidence() {
+        let mut list = tool(
+            "list_items",
+            "GET",
+            "/api/items",
+            true,
+            SafetyClassification::Read,
+        );
+        let long_text = "x".repeat(500);
+        list.example_response = Some(json!({
+            "items": [
+                {"id": 1, "description": long_text},
+                {"id": 2},
+                {"id": 3}
+            ],
+            "total": 3
+        }));
+        let spec = spec_with_base("http://127.0.0.1:1", vec![list]);
+
+        let schema = get_tool_schema(&spec, "list_items").unwrap();
+
+        assert!(
+            schema.get("evidence").is_none(),
+            "evidence belongs in get_evidence"
+        );
+        assert_eq!(schema["example_response_truncated"], json!(true));
+        let items = schema["example_response"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "arrays keep only the first element");
+        let description = items[0]["description"].as_str().unwrap();
+        assert!(
+            description.chars().count() <= 121,
+            "long strings are capped"
+        );
+        // Shape survives: scalar fields and the input schema are untouched.
+        assert_eq!(schema["example_response"]["total"], json!(3));
+        assert_eq!(schema["name"], json!("list_items"));
+        assert!(schema.get("input_schema").is_some());
     }
 
     #[test]

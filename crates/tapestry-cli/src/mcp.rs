@@ -377,7 +377,9 @@ fn available_sites() -> Vec<String> {
 
 fn tool_result(value: Value) -> Value {
     let is_error = value.get("status").and_then(Value::as_str) == Some("error");
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    // Compact JSON: the consumer is a model, and indentation is pure token
+    // cost on every single tool response.
+    let text = value.to_string();
     json!({
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
