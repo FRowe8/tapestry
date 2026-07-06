@@ -45,9 +45,10 @@ pub struct ToolDefinition {
     pub approved: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
+    #[default]
     ApiAction,
     StaticJsonResource,
     ConfigResource,
@@ -56,12 +57,6 @@ pub enum ResourceKind {
     PlatformResource,
     CommerceApi,
     Unknown,
-}
-
-impl Default for ResourceKind {
-    fn default() -> Self {
-        Self::ApiAction
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

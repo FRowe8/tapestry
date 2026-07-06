@@ -89,7 +89,7 @@ struct RuntimeRequest {
 
 pub fn load_toolspec(path: impl AsRef<Path>) -> Result<ToolSpec> {
     let raw = fs::read_to_string(path).context("failed to read ToolSpec")?;
-    Ok(serde_json::from_str(&raw).context("failed to parse ToolSpec")?)
+    serde_json::from_str(&raw).context("failed to parse ToolSpec")
 }
 
 pub fn load_credentials(path: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
@@ -180,7 +180,7 @@ pub fn load_approvals(path: impl AsRef<Path>) -> Result<BTreeMap<String, Approva
         return Ok(BTreeMap::new());
     }
     let raw = fs::read_to_string(path).context("failed to read approvals")?;
-    Ok(serde_json::from_str(&raw).context("failed to parse approvals JSON")?)
+    serde_json::from_str(&raw).context("failed to parse approvals JSON")
 }
 
 /// Outcome of overlaying stored approvals onto a freshly loaded ToolSpec.
@@ -794,7 +794,7 @@ fn build_request(tool: &ToolDefinition, args: &Map<String, Value>) -> RuntimeReq
         method: tool.method.clone(),
         path,
         query,
-        body: method_is_body.then(|| Value::Object(body)),
+        body: method_is_body.then_some(Value::Object(body)),
     }
 }
 
@@ -1209,18 +1209,13 @@ fn search_score(tool: &ToolDefinition, tokens: &[String], intent: TaskIntent) ->
                 6
             } else if graphql.contains(token) {
                 5
-            } else if input_schema.contains(token) {
-                4
-            } else if evidence.contains(token) {
+            } else if input_schema.contains(token) || evidence.contains(token) {
                 4
             } else if path.contains(token) {
                 3
             } else if warnings.contains(token) {
                 1
-            } else if resource_keywords
-                .iter()
-                .any(|keyword| *keyword == token.as_str())
-            {
+            } else if resource_keywords.contains(&token.as_str()) {
                 3
             } else {
                 0
@@ -1306,11 +1301,9 @@ fn is_static_resource_kind(kind: &ResourceKind) -> bool {
 }
 
 fn has_resource_intent(tokens: &[String], kind: &ResourceKind) -> bool {
-    tokens.iter().any(|token| {
-        resource_search_keywords(kind)
-            .iter()
-            .any(|keyword| *keyword == token.as_str())
-    })
+    tokens
+        .iter()
+        .any(|token| resource_search_keywords(kind).contains(&token.as_str()))
 }
 
 fn resource_search_keywords(kind: &ResourceKind) -> &'static [&'static str] {

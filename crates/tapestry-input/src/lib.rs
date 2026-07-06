@@ -175,7 +175,7 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
 
     let request_headers = parse_headers(request.get("headers"));
     let response_headers = response
-        .and_then(|r| Some(parse_headers(r.get("headers"))))
+        .map(|r| parse_headers(r.get("headers")))
         .unwrap_or_default();
     let response_status = response
         .and_then(|r| r.get("status"))
@@ -190,7 +190,7 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
 
     let response_body = response
         .and_then(|r| r.get("content"))
-        .and_then(|c| decode_content_body(c));
+        .and_then(decode_content_body);
 
     Some(Observation {
         method,

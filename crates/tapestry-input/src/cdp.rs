@@ -1093,15 +1093,16 @@ impl PendingObservation {
     }
 
     fn into_observation(mut self) -> Observation {
-        if self.request_finished && self.body_attempted && self.response_body.is_none() {
-            if !self
+        if self.request_finished
+            && self.body_attempted
+            && self.response_body.is_none()
+            && !self
                 .warnings
                 .iter()
                 .any(|warning| warning == "cdp_response_body_unavailable")
-            {
-                self.warnings
-                    .push("cdp_response_body_unavailable".to_string());
-            }
+        {
+            self.warnings
+                .push("cdp_response_body_unavailable".to_string());
         }
         Observation {
             method: self.method,
@@ -1421,7 +1422,6 @@ impl WsClient {
             Err(error) if is_timeout_error(&error) => return Ok(None),
             Err(error) => return Err(error),
         }
-        let fin = header[0] & 0x80 != 0;
         let opcode = header[0] & 0x0f;
         let masked = header[1] & 0x80 != 0;
         let mut length = (header[1] & 0x7f) as u64;
@@ -1452,13 +1452,7 @@ impl WsClient {
                 let _ = self.send_pong(&payload);
                 Ok(None)
             }
-            _ => {
-                if fin {
-                    Ok(None)
-                } else {
-                    Ok(None)
-                }
-            }
+            _ => Ok(None),
         }
     }
 

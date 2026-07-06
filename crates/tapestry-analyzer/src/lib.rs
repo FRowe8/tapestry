@@ -912,7 +912,7 @@ fn infer_response_schema(
         );
     }
 
-    let schema = schema_for_optional_values("response", &values, total, false, warnings);
+    let schema = schema_for_optional_values("response", values, total, false, warnings);
     info!(
         target: "tapestry::analyzer",
         phase = "schema",
@@ -1863,7 +1863,7 @@ fn is_likely_page_path(path: &str) -> bool {
         || !path
             .trim_matches('/')
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or_default()
             .contains('.')
 }
@@ -1917,7 +1917,7 @@ fn looks_float_id(seg: &str) -> bool {
 }
 
 fn path_has_build_hash(path: &str) -> bool {
-    path.split('/').any(|seg| is_gibberish_path_segment(seg))
+    path.split('/').any(is_gibberish_path_segment)
 }
 
 fn is_gibberish_path_segment(seg: &str) -> bool {
@@ -2162,7 +2162,7 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn normalize_identifier(value: &str) -> String {

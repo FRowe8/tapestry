@@ -1547,7 +1547,7 @@ fn load_credentials_raw(
         return Ok(std::collections::BTreeMap::new());
     }
     let raw = fs::read_to_string(path).context("failed to read credentials")?;
-    Ok(serde_json::from_str(&raw).context("failed to parse credentials JSON")?)
+    serde_json::from_str(&raw).context("failed to parse credentials JSON")
 }
 
 fn current_timestamp_cli() -> String {
@@ -1592,7 +1592,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 }
 
 fn is_leap(y: u64) -> bool {
-    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+    y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400))
 }
 
 fn load_site_observations(site: &str) -> Result<Vec<tapestry_core::Observation>> {
@@ -2612,7 +2612,7 @@ fn diagnose_site(
                 .count(),
             graphql_requests: observations
                 .iter()
-                .filter(|obs| graphql_operations_cli(obs).len() > 0)
+                .filter(|obs| !graphql_operations_cli(obs).is_empty())
                 .count(),
             graphql_responses_mapped: observations
                 .iter()
@@ -3564,7 +3564,7 @@ fn run_agent_task(
         if selection.result.safety == tapestry_core::SafetyClassification::Read
             && !selection.plan.missing.is_empty()
         {
-            out.push(format_missing_argument_guidance(spec, &selection));
+            out.push(format_missing_argument_guidance(spec, selection));
             return out.join("\n");
         }
 
@@ -3620,7 +3620,7 @@ fn run_agent_task(
 
     if response.get("status").and_then(Value::as_str) == Some("success") {
         out.push(summarize_success(
-            &candidates
+            candidates
                 .iter()
                 .find(|s| tried.last() == Some(&s.result.id))
                 .map(|s| s.result.name.as_str())
