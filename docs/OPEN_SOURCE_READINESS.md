@@ -35,11 +35,11 @@ Done when: CI is green on master, clippy is clean, the archive repo is gone.
 
 The whole first impression is: clean machine -> working agent tool call in under 10 minutes. Everything in this phase serves that.
 
-- [ ] **Rewrite README.md around one linear path**: install -> capture (or use the bundled `dummyjson-api.har`) -> `generate` -> `review` -> `serve` -> connect Claude Code via `.mcp.json` -> agent completes a task. One page, no forks. Move everything else to `docs/`.
-- [ ] **Demo must not require Rust.** Ship release binaries (next item) and make the README quickstart use them; `cargo install` is the fallback, `cargo run` appears only in CONTRIBUTING.
-- [ ] **Release binaries.** Set up `cargo-dist` (or a hand-rolled GitHub Actions release workflow) producing Windows/macOS/Linux binaries on tag push. Verify `tapestry doctor` passes on a machine that has never seen the repo.
-- [ ] **Fix the post-capture nudge.** Field testing showed users record sites and never run `generate` (three captures sat ungenerated). Make `record`/`import` end with an unmissable next-step line, or offer `--generate` to chain it.
-- [ ] **Demo site guidance.** The README should point first-time users at dummyjson.com or a bundled fixture, and say plainly that consumer sites with bot defense (Amazon etc.) are out of scope — link `docs/LIMITATIONS.md`.
+- [x] **Rewrite README.md around one linear path**: install -> capture (or use the bundled `dummyjson-api.har`) -> `generate` -> `review` -> `serve` -> connect Claude Code via `.mcp.json` -> agent completes a task. One page, no forks. Move everything else to `docs/`.
+- [x] **Demo must not require Rust.** Ship release binaries (next item) and make the README quickstart use them; `cargo install` is the fallback, `cargo run` appears only in the "Building from source" section (no CONTRIBUTING.md yet — that's Phase 6, out of scope for this pass).
+- [x] **Release binaries.** Added `.github/workflows/release.yml`: hand-rolled GitHub Actions workflow (not cargo-dist) producing Windows/macOS(x64+arm64)/Linux binaries on `v*.*.*` tag push, uploaded to a GitHub release. **Not yet verified against a real release** — no tag has been pushed; needs the maintainer to push a `v0.x.y` tag and confirm the release job succeeds and `tapestry doctor` passes on a machine that has never seen the repo.
+- [x] **Fix the post-capture nudge.** `import`/`record` now both accept `--generate` to chain generation immediately, and otherwise print an unmissable banner naming the exact next command.
+- [x] **Demo site guidance.** README points first-time users at the bundled fixture and dummyjson.com, states plainly that bot-defended consumer sites are out of scope, and links `docs/LIMITATIONS.md`.
 
 Done when: a person on a clean machine, following only the README, reaches a successful agent task in under 10 minutes without compiling anything.
 

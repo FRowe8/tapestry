@@ -1,113 +1,135 @@
 # Tapestry
 
-Tapestry turns captured web app traffic into structured tools for AI agents.
+Tapestry turns captured web app traffic into structured, safety-gated tools for AI agents. Instead of stuffing dozens of API schemas into an agent's context, Tapestry exposes four MCP meta-tools (`search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`) that let an agent find and call the right tool on demand — no matter how many endpoints a site has.
 
-## 30-Second Demo
+## Quickstart (10 minutes, no compiling required)
 
-From the repository root:
+This walks through the bundled `dummyjson-api.har` fixture, so you don't need a live site or a browser to try it.
 
-```bash
-cargo run -p tapestry-cli -- import examples/fixtures/simple.har --site demo
-cargo run -p tapestry-cli -- generate demo
-cargo run -p tapestry-cli -- agent-task demo "List the most recent 5 items" --trace
-```
+### 1. Install
 
-Example output:
+Download the latest binary for your OS from the [Releases page](https://github.com/FRowe8/tapestry/releases) and put `tapestry` (`tapestry.exe` on Windows) on your `PATH`.
 
-```text
-Imported 4 observations for site 'demo'
-Generated 3 tools for site 'demo'
-[agent] search_tools query="List the most recent 5 items"
-[agent] selected tool=list_items score=24
-[agent] schema loaded
-[agent] arguments={"limit":5}
-[agent] call_tool success
-Summary: 1 item(s) returned. One
-```
+No binary for your platform yet, or you'd rather build from git? See [Building from source](#building-from-source) below — `cargo install` is the fallback path, not the primary one.
 
-For HAR-only demo and fixture sites, Tapestry replays captured responses first so the demo does not wait on a missing local server. Pass `--live` to `agent-task` or `run` when you intentionally want live HTTP execution.
-
-## How It Works
-
-HAR captures browser network traffic.
-The analyzer filters noise and clusters API-like requests.
-It infers schemas and writes a ToolSpec.
-The native runtime searches tools, validates arguments, and executes or replays calls.
-The agent harness uses `search_tools -> get_tool_schema -> call_tool`.
-
-## Key Commands
+Sanity-check the install:
 
 ```bash
-tapestry import <har> --site <site>
-tapestry generate <site>
-tapestry tools search <site> "<query>"
-tapestry approve <site> --list
-tapestry approve <site> <tool_id>
-tapestry run <site> <tool> --args '{"limit":5}'
-tapestry agent-task <site> "<task>"
-tapestry agent-task <site> "<task>" --live
-tapestry review <site>
-tapestry diagnose <site>
-tapestry reauth <site>
-tapestry serve --site <site>
+tapestry doctor
 ```
 
-Repeated `import`/`record` runs on the same site merge new observations into the existing ones (exact duplicates are skipped), so you can build coverage across several sessions. Pass `--replace` to start a site fresh.
+### 2. Generate tools from a capture
 
-When running from source, prefix commands with:
+Use the bundled fixture (11 requests, no network access needed):
 
 ```bash
-cargo run -p tapestry-cli --
+tapestry import examples/fixtures/dummyjson-api.har --site demo --generate
 ```
 
-## Approving Write Tools
+`--generate` chains straight into tool generation, so this one command leaves you with a ready ToolSpec (8 tools). Prefer to capture your own site instead? See [Capturing your own site](#capturing-your-own-site) below.
 
-Write, unknown-safety, and low-confidence tools are blocked until you approve them:
+### 3. Review what was generated
 
 ```bash
-tapestry approve demo --list            # see what is pending and why
-tapestry tools evidence demo <tool_id>  # inspect before approving
-tapestry approve demo <tool_id>         # unblock it
+tapestry review demo
 ```
 
-Approvals live in `approvals.json` next to the ToolSpec and are pinned to the tool's request shape: re-running `generate` keeps approvals for unchanged tools and drops them when a tool's method, path, or input schema changes.
+This grades each tool (schema completeness, examples, confidence) so you can see what an agent will actually be able to call before you wire anything up.
 
-## Keeping Tools Alive
-
-Captured sessions expire and internal APIs drift. Two mechanisms keep a site usable:
-
-**Credential refresh.** When calls start failing with `auth_expired`, run:
+### 4. Serve it over MCP
 
 ```bash
-tapestry reauth demo
+tapestry serve --site demo
 ```
 
-A browser opens; log in as usual, perform one authenticated action, and press Enter. Tapestry harvests the fresh auth headers from first-party traffic and updates the site's stored credentials. Your keystrokes are never captured — only the resulting request headers.
+This starts an MCP stdio server. Leave it as a command an MCP client launches — don't run it standalone and expect interactive output.
 
-**Tool health.** Every live execution is checked against the inferred response schema. Tools whose responses drift are marked `degraded` (and failing endpoints `broken`) in the site's `meta.json`; the state surfaces as warnings in `tools search`, `review`, and MCP `search_tools` results, with a prompt to re-capture. Nothing is auto-disabled — you decide when to regenerate.
+### 5. Connect an agent
 
-## Connect an Agent (MCP)
-
-`tapestry serve` exposes the native runtime as an MCP stdio server. Agents see only four meta-tools (`search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`) no matter how many tools a site has.
-
-Add to your MCP client config (e.g. `.mcp.json` for Claude Code):
+Add a `.mcp.json` in your project (e.g. for Claude Code):
 
 ```json
 {
   "mcpServers": {
     "tapestry": {
-      "command": "cargo",
-      "args": ["run", "-q", "-p", "tapestry-cli", "--", "serve", "--site", "demo"]
+      "command": "tapestry",
+      "args": ["serve", "--site", "demo"]
     }
   }
 }
 ```
 
-With an installed binary, use `"command": "tapestry", "args": ["serve", "--site", "demo"]`. Omit `--site` to let the agent pass a `site` argument per call.
+Then ask your agent something like *"List the first 5 users"* or *"Find a product called iPhone 9"*. It will call `search_tools`, load the matching tool's schema with `get_tool_schema`, and execute it with `call_tool` — never seeing the other 7 tools' schemas until it needs them.
 
-## Useful Next Reads
+Want to see this loop without wiring up a full agent first? Tapestry ships a deterministic harness that exercises the same four calls:
 
-- [Demo walkthrough](examples/demo.md)
-- [Capture guide](docs/CAPTURE_GUIDE.md)
-- [Limitations](docs/LIMITATIONS.md)
+```bash
+tapestry agent-task demo "List the first 5 users" --trace
+```
+
+That's the whole loop: capture -> generate -> review -> serve -> agent call.
+
+## Capturing your own site
+
+Two ways to capture traffic:
+
+```bash
+tapestry record https://your-app.example.com --site myapp   # live CDP recording
+tapestry import path/to/exported.har --site myapp            # DevTools HAR export
+```
+
+Both accept `--generate` to chain straight into tool generation, and both merge repeated captures into the same site's observations (pass `--replace` to start fresh instead).
+
+**Good sites to try this on first:** [dummyjson.com](https://dummyjson.com) (a free public JSON API, no auth) or any internal/self-hosted app you control. **Out of scope:** consumer sites with bot defense (Amazon, most large retail/travel sites) — Tapestry does not do anti-bot evasion, and captures against those sites will be low-signal or blocked outright. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for the full list of what doesn't work yet.
+
+For what makes a capture good (response bodies, login state, GraphQL quirks), see [docs/CAPTURE_GUIDE.md](docs/CAPTURE_GUIDE.md).
+
+## What Tapestry is for
+
+Tapestry is built for internal tools, self-hosted apps, and B2B products you or your organization control — places where you can capture your own authenticated traffic and decide what an agent is allowed to touch. It is explicitly **not** for bypassing bot defenses, automating around a site's Terms of Service, or defeating CAPTCHAs.
+
+Safety is the differentiator, not an afterthought: every generated tool is classified by safety (read / write / unknown) and confidence; write and low-confidence tools are blocked from execution until you explicitly `tapestry approve` them; and every live response is checked against its inferred schema so drifting APIs get flagged (`degraded`/`broken`) instead of silently returning garbage to an agent.
+
+## Keeping tools alive
+
+Captured sessions expire and internal APIs drift. Two mechanisms handle this:
+
+- **Credential refresh** — when calls fail with `auth_expired`, run `tapestry reauth <site>`. A browser opens, you log in and perform one authenticated action, and Tapestry harvests the fresh auth headers (your keystrokes are never captured).
+- **Tool health** — every live execution is checked against the inferred response schema. Drifted tools are marked `degraded`/`broken` in `tools search`, `review`, and MCP `search_tools` results. Nothing is auto-disabled; regenerate when you're ready.
+
+## Approving write tools
+
+```bash
+tapestry approve demo --list            # see what is pending and why
+tapestry tools evidence demo <tool_id>   # inspect before approving
+tapestry approve demo <tool_id>          # unblock it
+```
+
+Approvals are pinned to a tool's request shape: re-running `generate` keeps approvals for unchanged tools and drops them when a tool's method, path, or input schema changes.
+
+## Reference
+
+- [Command reference and demo walkthrough](examples/demo.md)
+- [Capture guide](docs/CAPTURE_GUIDE.md) — what makes a capture good, live recording vs. HAR export
+- [Architecture](docs/ARCHITECTURE.md) — crate layout for contributors
+- [Limitations](docs/LIMITATIONS.md) — what doesn't work yet, and why
+- [Safety & security model](docs/SAFETY_SECURITY.md)
 - [Launch readiness roadmap](docs/ROADMAP.md)
+
+## Building from source
+
+Requires a recent stable Rust toolchain.
+
+```bash
+git clone https://github.com/FRowe8/tapestry.git
+cd tapestry
+cargo install --path crates/tapestry-cli
+```
+
+Or run without installing, prefixing every command with `cargo run -p tapestry-cli --`:
+
+```bash
+cargo run -p tapestry-cli -- import examples/fixtures/dummyjson-api.har --site demo --generate
+```
+
+To build and test the workspace itself: `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all -- --check` (all three run in CI on every PR).
