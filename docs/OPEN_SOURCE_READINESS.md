@@ -54,7 +54,7 @@ Done when: no source file exceeds ~1,500 lines, CI still green.
 ## Phase 3 — Close the capture story (product Gap 10 remainder)
 
 - [ ] **Re-record the two real-site CDP captures** (`next`, `justkandy`) with the fixed recorder, or retire those parity pairs from `crates/tapestry-cli/benchmark_cases.json` and rely on the self-hosted suite (Phase 4) for the parity gate. The current pairs compare against empty pre-fix captures and measure nothing. Requires a human to browse during recording — coordinate with the maintainer, or retire the pairs.
-- [ ] **Document the streamed-response limitation** in `docs/LIMITATIONS.md`: chunked/streamed bodies (e.g. Google `batchexecute`) fail `Network.getResponseBody` and are recorded with the `cdp_response_body_unavailable` warning. Candidate future fix: `Network.streamResourceContent`.
+- [x] **Document the streamed-response limitation** in `docs/LIMITATIONS.md`: chunked/streamed bodies (e.g. Google `batchexecute`) fail `Network.getResponseBody` and are recorded with the `cdp_response_body_unavailable` warning. Candidate future fix: `Network.streamResourceContent`.
 - [ ] **README recommendation.** Only after the parity gate passes may the README recommend `tapestry record` over DevTools HAR export; until then it presents both neutrally.
 
 Done when: every parity pair in the benchmark either passes "CDP meets HAR" or has been deliberately retired with a note.
