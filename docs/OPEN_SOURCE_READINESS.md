@@ -24,9 +24,9 @@ Already done (do not redo):
 
 ## Phase 0 — Repo mechanics
 
-- [ ] **CI.** Add `.github/workflows/ci.yml`: on push/PR run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings` (fix or explicitly allow existing warnings first), and `cargo fmt --all -- --check` on Linux + Windows runners. Cache cargo.
-- [ ] **Fix existing clippy warnings** so `-D warnings` is honest (there are a handful of pre-existing ones: derivable impls, needless refs, `Iterator::last` on double-ended iterators).
-- [ ] **Branch hygiene.** `master` is the default branch and is current. Delete or archive the `phase2-cdp-comparison` branch once its content is confirmed merged (it already is; the branch is historical).
+- [x] **CI.** Add `.github/workflows/ci.yml`: on push/PR run `cargo test --workspace`, `cargo clippy --workspace -- -D warnings` (fix or explicitly allow existing warnings first), and `cargo fmt --all -- --check` on Linux + Windows runners. Cache cargo.
+- [x] **Fix existing clippy warnings** so `-D warnings` is honest (there are a handful of pre-existing ones: derivable impls, needless refs, `Iterator::last` on double-ended iterators).
+- [x] **Branch hygiene.** `master` is the default branch and is current. Delete or archive the `phase2-cdp-comparison` branch once its content is confirmed merged (it already is; the branch is historical).
 - [ ] **Delete `FRowe8/tapestry-archive-prehistory`** once the maintainer confirms nothing else is needed from it. It contains personal data in its history and must never be made public. (Requires the maintainer: `gh auth refresh -s delete_repo` then `gh repo delete FRowe8/tapestry-archive-prehistory`.)
 
 Done when: CI is green on master, clippy is clean, the archive repo is gone.
