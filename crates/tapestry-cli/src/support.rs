@@ -355,6 +355,7 @@ pub(crate) fn apply_health_warnings(site: &str, spec: &mut tapestry_core::ToolSp
     }
 }
 
+/// Drop approvals whose tool disappeared or changed request shape during `generate`.
 pub(crate) fn prune_stale_approvals(site: &str, spec: &tapestry_core::ToolSpec) -> Result<()> {
     let approvals_path = site_dir(site).join("approvals.json");
     let approvals = tapestry_runtime::load_approvals(&approvals_path)?;
