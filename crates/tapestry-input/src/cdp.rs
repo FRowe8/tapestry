@@ -570,7 +570,13 @@ pub fn record(url: &str, options: &RecordOptions) -> Result<RecordResult> {
     let browser = resolve_browser(options.browser.as_deref())?;
     let port = reserve_port()?;
     let (profile_dir, ephemeral) = resolve_profile_dir(options.profile_dir.as_deref())?;
-    let mut child = launch_browser(&browser, port, &profile_dir, options.headless, "about:blank")?;
+    let mut child = launch_browser(
+        &browser,
+        port,
+        &profile_dir,
+        options.headless,
+        "about:blank",
+    )?;
     let timeout = Duration::from_secs(options.timeout_secs);
     let mut client = attach_and_navigate(port, timeout, url)?;
     let capture_options = CaptureOptions {
@@ -668,7 +674,10 @@ impl CredentialHarvester {
                     return;
                 };
                 let request = params.get("request").cloned().unwrap_or(Value::Null);
-                let url = request.get("url").and_then(Value::as_str).unwrap_or_default();
+                let url = request
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let first_party = self.is_first_party(url);
                 self.first_party_requests
                     .insert(request_id.to_string(), first_party);
@@ -925,7 +934,9 @@ fn wait_for_page_target(port: u16, timeout: Duration) -> Result<String> {
     let list_url = format!("http://127.0.0.1:{port}/json/list");
     loop {
         if let Ok(response) = ureq::get(&list_url).call() {
-            if let Ok(targets) = serde_json::from_reader::<_, Vec<DevToolsTarget>>(response.into_reader()) {
+            if let Ok(targets) =
+                serde_json::from_reader::<_, Vec<DevToolsTarget>>(response.into_reader())
+            {
                 if let Some(ws_url) = targets
                     .into_iter()
                     .filter(|t| t.target_type.as_deref() == Some("page"))
@@ -936,9 +947,7 @@ fn wait_for_page_target(port: u16, timeout: Duration) -> Result<String> {
             }
         }
         if Instant::now() >= deadline {
-            anyhow::bail!(
-                "Timed out waiting for a page target on DevTools port {port}."
-            );
+            anyhow::bail!("Timed out waiting for a page target on DevTools port {port}.");
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -970,7 +979,7 @@ fn launch_browser(
         .arg("--disable-sync")
         .arg("--disable-extensions")
         .arg("--new-window")
-            .arg(url)
+        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1217,7 +1226,11 @@ fn registrable_domain(host: &str) -> Option<String> {
     } else {
         2
     };
-    Some(parts[parts.len().saturating_sub(n)..].join(".").to_ascii_lowercase())
+    Some(
+        parts[parts.len().saturating_sub(n)..]
+            .join(".")
+            .to_ascii_lowercase(),
+    )
 }
 
 /// Whether two hosts belong to the same site for first-party filtering.
@@ -1687,7 +1700,11 @@ mod tests {
     #[test]
     fn harvester_merges_extra_info_cookies_and_normalizes_names() {
         let mut harvester = CredentialHarvester::new("https://app.example.com");
-        harvester.ingest_message(&request_event("1", "https://app.example.com/api", json!({})));
+        harvester.ingest_message(&request_event(
+            "1",
+            "https://app.example.com/api",
+            json!({}),
+        ));
         harvester.ingest_message(&json!({
             "method": "Network.requestWillBeSentExtraInfo",
             "params": {
@@ -2039,12 +2056,30 @@ mod tests {
 
     #[test]
     fn registrable_domain_handles_common_patterns() {
-        assert_eq!(registrable_domain("www.example.com"), Some("example.com".to_string()));
-        assert_eq!(registrable_domain("xcdn.example.com"), Some("example.com".to_string()));
-        assert_eq!(registrable_domain("www.next.co.uk"), Some("next.co.uk".to_string()));
-        assert_eq!(registrable_domain("xcdn.next.co.uk"), Some("next.co.uk".to_string()));
-        assert_eq!(registrable_domain("api.tesco.com"), Some("tesco.com".to_string()));
-        assert_eq!(registrable_domain("example.com"), Some("example.com".to_string()));
+        assert_eq!(
+            registrable_domain("www.example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            registrable_domain("xcdn.example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            registrable_domain("www.next.co.uk"),
+            Some("next.co.uk".to_string())
+        );
+        assert_eq!(
+            registrable_domain("xcdn.next.co.uk"),
+            Some("next.co.uk".to_string())
+        );
+        assert_eq!(
+            registrable_domain("api.tesco.com"),
+            Some("tesco.com".to_string())
+        );
+        assert_eq!(
+            registrable_domain("example.com"),
+            Some("example.com".to_string())
+        );
         assert_eq!(registrable_domain("localhost"), None);
     }
 
@@ -2213,7 +2248,10 @@ mod tests {
         let body = observations[0].request_body.as_ref().unwrap();
         assert_eq!(body["username"], "alice");
         assert_eq!(body["password"], "<redacted>");
-        assert_eq!(observations[0].response_body.as_ref().unwrap()["token"], "<redacted>");
+        assert_eq!(
+            observations[0].response_body.as_ref().unwrap()["token"],
+            "<redacted>"
+        );
     }
 
     #[test]
@@ -2247,7 +2285,11 @@ mod tests {
     fn non_200_status_codes_are_captured() {
         let mut builder =
             CdpObservationBuilder::new(CaptureOptions::default(), "http://example.com");
-        for (id, status, path) in [("1", 404u64, "/api/missing"), ("2", 401, "/api/secret"), ("3", 500, "/api/broken")] {
+        for (id, status, path) in [
+            ("1", 404u64, "/api/missing"),
+            ("2", 401, "/api/secret"),
+            ("3", 500, "/api/broken"),
+        ] {
             builder.ingest_message(&json!({
                 "method": "Network.requestWillBeSent",
                 "params": { "requestId": id, "request": { "method": "GET",
@@ -2298,7 +2340,10 @@ mod tests {
 
         // Cookie header should be present (and redacted as a secret header)
         assert!(observations[0].request_headers.contains_key("Cookie"));
-        assert_eq!(observations[0].request_headers["Accept"], "application/json");
+        assert_eq!(
+            observations[0].request_headers["Accept"],
+            "application/json"
+        );
     }
 
     #[test]
@@ -2326,7 +2371,10 @@ mod tests {
 
         let observations = builder.finalize();
 
-        assert_eq!(observations[0].response_headers["content-type"], "application/json");
+        assert_eq!(
+            observations[0].response_headers["content-type"],
+            "application/json"
+        );
         assert_eq!(observations[0].response_headers["x-cache"], "HIT");
     }
 
@@ -2335,7 +2383,10 @@ mod tests {
     #[test]
     fn include_third_party_captures_foreign_hosts() {
         let mut builder = CdpObservationBuilder::new(
-            CaptureOptions { include_third_party: true, max_body_bytes: usize::MAX },
+            CaptureOptions {
+                include_third_party: true,
+                max_body_bytes: usize::MAX,
+            },
             "http://example.com",
         );
         builder.ingest_message(&json!({

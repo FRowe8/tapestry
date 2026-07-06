@@ -611,19 +611,13 @@ fn main() -> Result<()> {
                             "captured_at": current_timestamp_cli()
                         }),
                     );
-                    write_secret(
-                        &creds_path,
-                        &serde_json::to_string_pretty(&creds)?,
-                    )?;
+                    write_secret(&creds_path, &serde_json::to_string_pretty(&creds)?)?;
                     println!("Stored credential '{header}' for site '{site}'.");
                 }
                 CredentialsCommand::Remove { header } => {
                     let mut creds = load_credentials_raw(&creds_path)?;
                     if creds.remove(&header).is_some() {
-                        write_secret(
-                            &creds_path,
-                            &serde_json::to_string_pretty(&creds)?,
-                        )?;
+                        write_secret(&creds_path, &serde_json::to_string_pretty(&creds)?)?;
                         println!("Removed credential '{header}' for site '{site}'.");
                     } else {
                         println!("No credential '{header}' found for site '{site}'.");
@@ -638,10 +632,9 @@ fn main() -> Result<()> {
                     }
                 }
                 CredentialsCommand::FromHar { har } => {
-                    let raw = fs::read_to_string(&har)
-                        .context("failed to read HAR file")?;
-                    let json: Value = serde_json::from_str(&raw)
-                        .context("failed to parse HAR JSON")?;
+                    let raw = fs::read_to_string(&har).context("failed to read HAR file")?;
+                    let json: Value =
+                        serde_json::from_str(&raw).context("failed to parse HAR JSON")?;
                     let entries = json
                         .get("log")
                         .and_then(|v| v.get("entries"))
@@ -698,10 +691,7 @@ fn main() -> Result<()> {
                         for (name, entry) in &extracted {
                             existing.insert(name.clone(), entry.clone());
                         }
-                        write_secret(
-                            &creds_path,
-                            &serde_json::to_string_pretty(&existing)?,
-                        )?;
+                        write_secret(&creds_path, &serde_json::to_string_pretty(&existing)?)?;
                         println!(
                             "Extracted {} credential(s) from HAR for site '{site}':",
                             extracted.len()
@@ -726,9 +716,7 @@ fn main() -> Result<()> {
                 None => load_site_spec(&site)
                     .ok()
                     .and_then(|spec| spec.site.base_url)
-                    .context(
-                        "site has no base URL; pass the login page with --url <url>",
-                    )?,
+                    .context("site has no base URL; pass the login page with --url <url>")?,
             };
             info!(command = "reauth", site, url = %target_url, "starting credential refresh");
             eprintln!(
@@ -839,7 +827,9 @@ fn run_approve(
 
     if list || tool_id.is_none() {
         if revoke {
-            anyhow::bail!("--revoke requires a tool id: tapestry approve {site} <tool_id> --revoke");
+            anyhow::bail!(
+                "--revoke requires a tool id: tapestry approve {site} <tool_id> --revoke"
+            );
         }
         println!("{}", format_approval_status(site, &spec, &approvals));
         return Ok(());
@@ -1177,9 +1167,7 @@ fn classify_tool_health(
                     status: "degraded".to_string(),
                     last_checked: now.to_string(),
                     last_success: previous_success,
-                    detail: Some(
-                        "live response no longer matches the inferred schema".to_string(),
-                    ),
+                    detail: Some("live response no longer matches the inferred schema".to_string()),
                     http_status,
                     field_compatibility: None,
                 }),
@@ -1911,8 +1899,8 @@ fn build_context_reduction(
     }
 
     let reductions: Vec<f64> = sites.iter().filter_map(|site| site.reduction).collect();
-    let mean_reduction = (!reductions.is_empty())
-        .then(|| reductions.iter().sum::<f64>() / reductions.len() as f64);
+    let mean_reduction =
+        (!reductions.is_empty()).then(|| reductions.iter().sum::<f64>() / reductions.len() as f64);
 
     ContextReductionReport {
         meta_tool_tokens,
@@ -2310,7 +2298,10 @@ fn format_benchmark_text(report: &BenchmarkReport) -> String {
         if let Some(reduction) = site.reduction {
             out.push(format!(
                 "  {}: {} tool(s), full toolspec ~{} tokens -> {:.1}% reduction",
-                site.site, site.tools, site.full_toolspec_tokens, reduction * 100.0
+                site.site,
+                site.tools,
+                site.full_toolspec_tokens,
+                reduction * 100.0
             ));
         }
     }
@@ -3725,13 +3716,15 @@ fn select_agent_candidates(
 
     candidates
         .into_iter()
-        .map(|(_, result, plan, replayable, ranking_notes)| AgentToolSelection {
-            result,
-            plan,
-            replayable,
-            intent,
-            ranking_notes,
-        })
+        .map(
+            |(_, result, plan, replayable, ranking_notes)| AgentToolSelection {
+                result,
+                plan,
+                replayable,
+                intent,
+                ranking_notes,
+            },
+        )
         .collect()
 }
 
@@ -3812,16 +3805,25 @@ fn agent_selection_score(
     // Penalise framework-generated versioned paths regardless of mode
     if is_framework_path_cli(&tool.path) {
         score -= 40;
-        notes.push(format!("[agent] rank penalty framework_path {}", result.name));
+        notes.push(format!(
+            "[agent] rank penalty framework_path {}",
+            result.name
+        ));
     }
 
     // Penalise low-confidence tools so high-quality tools rank above them
     if result.confidence < 0.5 {
         score -= 30;
-        notes.push(format!("[agent] rank penalty low_confidence {}", result.name));
+        notes.push(format!(
+            "[agent] rank penalty low_confidence {}",
+            result.name
+        ));
     } else if result.confidence < 0.7 {
         score -= 10;
-        notes.push(format!("[agent] rank penalty below_threshold_confidence {}", result.name));
+        notes.push(format!(
+            "[agent] rank penalty below_threshold_confidence {}",
+            result.name
+        ));
     }
 
     RankingScore { score, notes }
@@ -4915,8 +4917,7 @@ mod tests {
             "error_type": "endpoint_error",
             "http_status": 500
         });
-        let update =
-            classify_tool_health(&response, "live", "T1", Some("T0".to_string()));
+        let update = classify_tool_health(&response, "live", "T1", Some("T0".to_string()));
         let health = update.tool_health.expect("health recorded");
         assert_eq!(health.status, "broken");
         assert_eq!(health.http_status, Some(500));
@@ -6016,7 +6017,10 @@ mod tests {
 
         let observations_json = serde_json::to_string(&observations).unwrap();
         let toolspec_json = serde_json::to_string(&spec).unwrap();
-        assert!(!observations_json.contains("FAKESECRET"), "observations leaked");
+        assert!(
+            !observations_json.contains("FAKESECRET"),
+            "observations leaked"
+        );
         assert!(!toolspec_json.contains("FAKESECRET"), "toolspec leaked");
 
         // Review and diagnose reports are printed to stdout; they must be
@@ -6155,7 +6159,10 @@ mod tests {
         assert_eq!(parity.len(), 2);
         let app = parity.iter().find(|p| p.group == "app").expect("app pair");
         assert!(app.cdp_meets_har);
-        let shop = parity.iter().find(|p| p.group == "shop").expect("shop pair");
+        let shop = parity
+            .iter()
+            .find(|p| p.group == "shop")
+            .expect("shop pair");
         assert!(!shop.cdp_meets_har);
         assert_eq!(shop.har.api_observations, 5);
         assert_eq!(shop.cdp.api_observations, 0);
