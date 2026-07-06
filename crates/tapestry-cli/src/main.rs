@@ -37,6 +37,8 @@ enum Command {
             help = "Replace existing observations instead of merging into them"
         )]
         replace: bool,
+        #[arg(long, help = "Immediately run `generate` after a successful import")]
+        generate: bool,
     },
     #[command(
         about = "Record network traffic from a browser session using CDP",
@@ -89,6 +91,8 @@ enum Command {
             help = "Use a throwaway browser profile instead of the site's persistent one"
         )]
         ephemeral_profile: bool,
+        #[arg(long, help = "Immediately run `generate` after a successful recording")]
+        generate: bool,
     },
     #[command(
         about = "Generate a ToolSpec from imported observations",
@@ -339,7 +343,12 @@ fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Import { har, site, replace } => {
+        Command::Import {
+            har,
+            site,
+            replace,
+            generate,
+        } => {
             validate_site_name(&site)?;
             eprintln!(
                 "Warning: HAR files may contain credentials and personal data. Tapestry will persist redacted observations, not the raw HAR."
@@ -349,6 +358,11 @@ fn main() -> Result<()> {
             let source = format!("har:{}", har.display());
             let outcome = store_capture(&site, &source, observations, replace)?;
             println!("{}", format_capture_message(&site, &outcome, "Imported"));
+            if generate {
+                run_generate(&site)?;
+            } else {
+                print_generate_nudge(&site);
+            }
         }
         Command::Record {
             url,
@@ -364,6 +378,7 @@ fn main() -> Result<()> {
             allow_low_signal,
             replace,
             ephemeral_profile,
+            generate,
         } => {
             validate_site_name(&site)?;
             info!(command = "record", site, url = %url, "starting CDP capture");
@@ -407,21 +422,14 @@ fn main() -> Result<()> {
                 println!("{}", format_capture_message(&site, &outcome, "Recorded"));
             }
             println!("{summary_text}");
+            if generate {
+                run_generate(&site)?;
+            } else {
+                print_generate_nudge(&site);
+            }
         }
         Command::Generate { site } => {
-            validate_site_name(&site)?;
-            info!(command = "generate", site, "starting ToolSpec generation");
-            let dir = site_dir(&site);
-            let raw =
-                fs::read_to_string(dir.join("observations.json")).context("run import first")?;
-            let observations: Vec<tapestry_core::Observation> = serde_json::from_str(&raw)?;
-            let spec = tapestry_analyzer::analyze(&site, &observations);
-            write_protected(
-                &dir.join("toolspec.json"),
-                &serde_json::to_string_pretty(&spec)?,
-            )?;
-            println!("Generated {} tools for site '{}'", spec.tools.len(), site);
-            prune_stale_approvals(&site, &spec)?;
+            run_generate(&site)?;
         }
         Command::Redact { har } => {
             info!(command = "redact", har = %har.display(), "redacting HAR");
@@ -1606,7 +1614,7 @@ fn format_record_summary(site: &str, observations: &[tapestry_core::Observation]
     let coverage = round2(summary.response_body_coverage() * 100.0);
 
     format!(
-        "Recorded {} observations\nCapture quality: {}\nAPI observations: {}\nResponse body coverage: {:.0}%\nReplayable tools (estimate): {}\nMissing response bodies: {}\nJSON responses: {}\nGraphQL requests: {}\nRecommended next action: {}\nSaved to {}\nNext: tapestry generate {}",
+        "Recorded {} observations\nCapture quality: {}\nAPI observations: {}\nResponse body coverage: {:.0}%\nReplayable tools (estimate): {}\nMissing response bodies: {}\nJSON responses: {}\nGraphQL requests: {}\nRecommended next action: {}\nSaved to {}",
         summary.total_observations,
         summary.quality_grade(),
         summary.candidate_api_observations,
@@ -1619,8 +1627,38 @@ fn format_record_summary(site: &str, observations: &[tapestry_core::Observation]
         summary.graphql_requests,
         summary.recommended_next_action(),
         site_dir(site).join("observations.json").display(),
-        site
     )
+}
+
+/// Run `generate` for a site: analyze stored observations into a ToolSpec,
+/// write it to disk, and prune approvals that no longer match. Shared by the
+/// standalone `generate` command and the `--generate` chaining flag on
+/// `import`/`record`.
+fn run_generate(site: &str) -> Result<()> {
+    validate_site_name(site)?;
+    info!(command = "generate", site, "starting ToolSpec generation");
+    let dir = site_dir(site);
+    let raw = fs::read_to_string(dir.join("observations.json")).context("run import first")?;
+    let observations: Vec<tapestry_core::Observation> = serde_json::from_str(&raw)?;
+    let spec = tapestry_analyzer::analyze(site, &observations);
+    write_protected(
+        &dir.join("toolspec.json"),
+        &serde_json::to_string_pretty(&spec)?,
+    )?;
+    println!("Generated {} tools for site '{}'", spec.tools.len(), site);
+    prune_stale_approvals(site, &spec)?;
+    Ok(())
+}
+
+/// Print an unmissable next-step line after a capture (`import`/`record`)
+/// that was not immediately followed by generation. Field testing showed
+/// users routinely stop after capturing and never run `generate`, leaving
+/// captured sessions un-generated; this banner (and the `--generate` flag
+/// that skips it) close that gap.
+fn print_generate_nudge(site: &str) {
+    println!(
+        "\n============================================================\n>>> NEXT STEP REQUIRED: run `tapestry generate {site}`\n    (or re-run this command with --generate to do it now)\n============================================================"
+    );
 }
 
 fn print_record_guidance() {
@@ -6216,9 +6254,11 @@ mod tests {
                 allow_low_signal,
                 replace,
                 ephemeral_profile,
+                generate,
             } => {
                 assert!(!replace);
                 assert!(!ephemeral_profile);
+                assert!(!generate);
                 assert_eq!(url, "https://example.com");
                 assert_eq!(site, "demo");
                 assert_eq!(browser.as_deref(), Some(std::path::Path::new("chrome.exe")));
