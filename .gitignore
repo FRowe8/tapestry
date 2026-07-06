@@ -3,3 +3,8 @@ target/
 .env
 *.log
 .DS_Store
+.claude/settings.local.json
+.worktrees/
+# Real browser captures are secrets (see docs/SAFETY_SECURITY.md); only
+# synthetic fixtures belong in examples/fixtures/.
+examples/fixtures/www.*.har

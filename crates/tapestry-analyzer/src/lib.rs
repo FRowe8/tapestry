@@ -2271,8 +2271,8 @@ mod tests {
 
     #[test]
     fn browser_docs_capture_does_not_generate_asset_or_page_tools() {
-        let observations = import_har("../../examples/fixtures/dummyjson.com.har").unwrap();
-        let spec = analyze("dummyjson", &observations);
+        let observations = import_har("../../examples/fixtures/browser-noise.har").unwrap();
+        let spec = analyze("docs-site", &observations);
 
         assert!(spec.tools.is_empty());
     }

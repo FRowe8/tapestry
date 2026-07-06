@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn skips_blank_method_and_non_http_entries_in_browser_fixture() {
-        let observations = import_har("../../examples/fixtures/dummyjson.com.har").unwrap();
+        let observations = import_har("../../examples/fixtures/browser-noise.har").unwrap();
 
         assert!(!observations.is_empty());
         assert!(observations.iter().all(|obs| !obs.method.is_empty()));
