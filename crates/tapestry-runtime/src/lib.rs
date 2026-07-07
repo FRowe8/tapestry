@@ -15,11 +15,18 @@ use url::Url;
 
 pub const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.70;
 
+/// Execution behavior for `call_tool_with_options` and friends: how much to
+/// trust captured HAR responses vs. calling the network live, request
+/// timeouts, pagination limits, and injected credentials.
 #[derive(Debug, Clone)]
 pub struct RuntimeOptions {
+    /// Tools below this overall confidence require approval even if `Read`-safe.
     pub confidence_threshold: f64,
+    /// Allow falling back to a captured HAR response when live execution fails.
     pub allow_har_replay: bool,
+    /// Try HAR replay before attempting a live call (used for HAR-sourced/local sites).
     pub prefer_har_replay: bool,
+    /// Never call the network; only ever replay captured HAR responses.
     pub offline_har_replay: bool,
     pub max_pages: usize,
     pub request_timeout_secs: u64,
@@ -41,6 +48,9 @@ impl Default for RuntimeOptions {
     }
 }
 
+/// One ranked match from `search_tools`. This is deliberately small (no
+/// schema, no evidence) — the low-token summary an agent sees before
+/// deciding whether to load the full schema via `get_tool_schema`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub id: String,
@@ -54,6 +64,9 @@ pub struct SearchResult {
     pub warnings: Vec<String>,
 }
 
+/// Coarse guess at what a natural-language task is trying to do, used to
+/// bias tool ranking in `search_tools`/agent selection (e.g. prefer a
+/// `Read` tool for `SearchOrList`, allow `Write` tools for `CreateOrAdd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskIntent {
     SearchOrList,
@@ -87,11 +100,14 @@ struct RuntimeRequest {
     body: Option<Value>,
 }
 
+/// Load a `ToolSpec` written by `tapestry generate` from disk.
 pub fn load_toolspec(path: impl AsRef<Path>) -> Result<ToolSpec> {
     let raw = fs::read_to_string(path).context("failed to read ToolSpec")?;
     serde_json::from_str(&raw).context("failed to parse ToolSpec")
 }
 
+/// Load a site's stored credential headers (name -> value), or an empty map
+/// if the file doesn't exist yet.
 pub fn load_credentials(path: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
     let path = path.as_ref();
     if !path.exists() {
@@ -174,6 +190,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Load a site's stored approvals (tool id -> `ApprovalRecord`), or an empty
+/// map if `approvals.json` doesn't exist yet.
 pub fn load_approvals(path: impl AsRef<Path>) -> Result<BTreeMap<String, ApprovalRecord>> {
     let path = path.as_ref();
     if !path.exists() {
@@ -219,6 +237,11 @@ pub fn apply_approvals(
     overlay
 }
 
+/// Meta-tool 1 of 4: rank a site's tools against a natural-language query
+/// and return the top `limit` low-token summaries. This is the only thing an
+/// agent sees before deciding which tool (if any) to load a schema for —
+/// the whole point of the four-meta-tool design is that this list, not the
+/// full ToolSpec, is what fits in context.
 pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchResult> {
     info!(
         target: "tapestry::runtime",
@@ -266,6 +289,10 @@ pub fn search_tools(spec: &ToolSpec, query: &str, limit: usize) -> Vec<SearchRes
         .collect()
 }
 
+/// Meta-tool 2 of 4: the full call contract for one tool (input/response
+/// schema, safety, confidence, an `arguments` calling convention hint, and
+/// whether it's blocked pending approval), with the bulky example payload
+/// and evidence trimmed out — call `get_evidence` separately for those.
 pub fn get_tool_schema(spec: &ToolSpec, tool_id: &str) -> Option<Value> {
     info!(
         target: "tapestry::runtime",
@@ -360,6 +387,10 @@ fn truncate_example_value(value: &mut Value) -> bool {
     }
 }
 
+/// Meta-tool 4 of 4: the supporting evidence, warnings, and confidence
+/// breakdown behind a tool's inferred shape — the detail `get_tool_schema`
+/// deliberately omits, for when an agent or human needs to judge whether a
+/// tool (especially one pending approval) is trustworthy.
 pub fn get_evidence(spec: &ToolSpec, tool_id: &str) -> Value {
     info!(
         target: "tapestry::runtime",
@@ -388,10 +419,17 @@ pub fn get_evidence(spec: &ToolSpec, tool_id: &str) -> Value {
     })
 }
 
+/// `call_tool_with_options` with default `RuntimeOptions`.
 pub fn call_tool(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Value {
     call_tool_with_options(spec, tool_id, arguments, &RuntimeOptions::default())
 }
 
+/// Meta-tool 3 of 4: validate `arguments` against a tool's input schema,
+/// enforce the safety gate (blocked until approved, unless read-safe above
+/// the confidence threshold), then execute — live over HTTP or by replaying
+/// a captured HAR response, per `options`. Always returns a structured JSON
+/// value (see `RuntimeErrorResponse` for the error shape); never panics on
+/// a bad call.
 pub fn call_tool_with_options(
     spec: &ToolSpec,
     tool_id: &str,
@@ -542,6 +580,10 @@ fn har_replay_response(tool: &ToolDefinition, request: &RuntimeRequest, note: &s
     })
 }
 
+/// Validate and plan a call the same way `call_tool_with_options` does, but
+/// always return the tool's captured example response instead of executing
+/// — for previewing what a call would look like without touching the
+/// network or requiring approval.
 pub fn call_tool_dry_run(spec: &ToolSpec, tool_id: &str, arguments: Value) -> Value {
     let Some(tool) = spec.tools.iter().find(|t| matches_tool(t, tool_id)) else {
         return runtime_error(
@@ -1110,6 +1152,9 @@ fn query_tokens(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Keyword-based guess at a natural-language task's `TaskIntent`, used to
+/// bias tool ranking (e.g. a "list" task favors read tools; a "delete" task
+/// won't be satisfied by a read-only tool no matter how well it scores).
 pub fn classify_task_intent(task: &str) -> TaskIntent {
     let task_lower = task.to_ascii_lowercase();
     if contains_any_phrase(&task_lower, &["delete", "remove", "cancel"]) {
