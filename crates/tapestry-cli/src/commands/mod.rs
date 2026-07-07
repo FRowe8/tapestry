@@ -5,3 +5,4 @@
 pub(crate) mod approve;
 pub(crate) mod capture;
 pub(crate) mod doctor;
+pub(crate) mod review;
