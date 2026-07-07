@@ -373,15 +373,11 @@ fn truncate_example_value(value: &mut Value) -> bool {
             }
             truncated
         }
-        Value::String(text) => {
-            if text.chars().count() > MAX_STRING_LEN {
-                let mut clipped: String = text.chars().take(MAX_STRING_LEN).collect();
-                clipped.push('…');
-                *text = clipped;
-                true
-            } else {
-                false
-            }
+        Value::String(text) if text.chars().count() > MAX_STRING_LEN => {
+            let mut clipped: String = text.chars().take(MAX_STRING_LEN).collect();
+            clipped.push('…');
+            *text = clipped;
+            true
         }
         _ => false,
     }
