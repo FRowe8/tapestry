@@ -3,6 +3,7 @@
 //! for each command lives here.
 
 pub(crate) mod approve;
+pub(crate) mod benchmark;
 pub(crate) mod capture;
 pub(crate) mod diagnose;
 pub(crate) mod doctor;
