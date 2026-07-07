@@ -629,3 +629,7 @@ pub(crate) fn has_localhost_base_url(base_url: Option<&str>) -> bool {
         Some("localhost") | Some("127.0.0.1") | Some("::1")
     )
 }
+
+pub(crate) fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
