@@ -1,15 +1,13 @@
 //! `tapestry validate` — run one agent task end-to-end against a site and
 //! combine the result with review/diagnose summaries into a single
 //! recommended next action.
-//!
-//! NOTE: still depends on agent-selection types/functions (AgentToolSelection,
-//! select_agent_tool, format_missing_argument_guidance, summarize_success,
-//! summarize_error) that live in main.rs until the agent-task command is
-//! extracted in a later commit; `use crate::*` bridges that temporarily.
 
-use crate::commands::diagnose::diagnose_site;
-use crate::commands::review::review_toolspec;
-use crate::*;
+use crate::commands::agent::{
+    format_missing_argument_guidance, select_agent_tool, summarize_error, summarize_success,
+    AgentToolSelection,
+};
+use crate::commands::diagnose::{diagnose_site, DiagnoseReport, DiagnoseSummary};
+use crate::commands::review::{review_toolspec, ReviewReport, ReviewSummary};
 use serde::Serialize;
 use serde_json::Value;
 

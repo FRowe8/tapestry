@@ -2,6 +2,7 @@
 //! `clap` `Command` enum and the top-level dispatch `match`; the actual work
 //! for each command lives here.
 
+pub(crate) mod agent;
 pub(crate) mod approve;
 pub(crate) mod benchmark;
 pub(crate) mod capture;
