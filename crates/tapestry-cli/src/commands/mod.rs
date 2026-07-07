@@ -7,3 +7,4 @@ pub(crate) mod capture;
 pub(crate) mod diagnose;
 pub(crate) mod doctor;
 pub(crate) mod review;
+pub(crate) mod validate;
