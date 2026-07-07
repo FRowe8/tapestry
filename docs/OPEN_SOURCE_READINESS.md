@@ -28,8 +28,11 @@ Already done (do not redo):
 - [x] **Fix existing clippy warnings** so `-D warnings` is honest (there are a handful of pre-existing ones: derivable impls, needless refs, `Iterator::last` on double-ended iterators).
 - [x] **Branch hygiene.** `master` is the default branch and is current. Delete or archive the `phase2-cdp-comparison` branch once its content is confirmed merged (it already is; the branch is historical).
 - [ ] **Delete `FRowe8/tapestry-archive-prehistory`** once the maintainer confirms nothing else is needed from it. It contains personal data in its history and must never be made public. (Requires the maintainer: `gh auth refresh -s delete_repo` then `gh repo delete FRowe8/tapestry-archive-prehistory`.)
+- [ ] **Pin the Rust toolchain.** Add `rust-toolchain.toml` pinning a specific stable (match whatever the CI runners currently ship, e.g. `1.96.0`) so local and CI use identical rustc/clippy. Motivation: a lint that passed on local 1.93 failed on the runners' 1.96 the day CI landed. Update the pin deliberately, as its own commit, when new lints are triaged.
+- [ ] **Dependency security in CI.** Add a `cargo audit` job (advisory DB scan) and enable Dependabot (or Renovate) for cargo updates. A credential-handling tool must be seen to take supply-chain security seriously; this is also a Phase 7 launch expectation.
+- [ ] **Remove `prompts/` and `.codex/`.** These are the internal scaffolding prompts from the original build (`.codex/INSTRUCTIONS.md` still says "Do not build: MCP server", which is now false). They will confuse public newcomers; git history preserves them. Remove both directories in one commit.
 
-Done when: CI is green on master, clippy is clean, the archive repo is gone.
+Done when: CI (including audit) is green on master, clippy is clean, the toolchain is pinned, the scaffolding dirs are gone, and the archive repo is deleted.
 
 ## Phase 1 — The ten-minute quickstart
 
@@ -95,10 +98,15 @@ Run every check even if it "should" pass:
 - [ ] **Fixture audit**: open every file in `examples/fixtures/` and confirm it is synthetic or verified-clean (no cookies, no auth headers, no real user data).
 - [ ] **Docs read-through**: README, LIMITATIONS, SAFETY_SECURITY, CAPTURE_GUIDE — no stale claims (e.g. do not claim CDP > HAR unless Phase 3 closed it; do not cite token numbers Phase 5 didn't measure).
 - [ ] **Flip to public** (Settings -> visibility), or push to a brand-new public repo if there is any doubt about server-side retention of old objects.
-- [ ] **Tag `v0.5.0`**, publish release binaries, then announce (Show HN / r/rust / r/LocalLLaMA / MCP community). The demo GIF or asciinema of capture-to-agent-task in under a minute is worth more than any text.
+- [ ] **The demo asset.** Record a 60-90 second GIF/asciinema of the whole loop: record a browsing session -> `generate` -> agent completes a task over MCP. Embed it at the top of the README. For launch impact this single asset outweighs everything else in this phase; treat it as a launch blocker, not a garnish.
+- [ ] **Tag `v0.5.0`**, publish release binaries, then announce (Show HN / r/rust / r/LocalLLaMA / MCP community).
 
 Done when: the repo is public, CI badge is green, binaries are downloadable, and the quickstart works for someone who has never spoken to the maintainer.
 
 ## Explicitly out of scope for the OSS launch
 
 Per `docs/ROADMAP.md`, do not build these now: anti-bot evasion, OAuth/SSO/MFA automation, team sharing / ToolSpec marketplace, WebSocket/SSE capture, proxy capture, browser extension. Saying no to these is part of the positioning.
+
+## After launch
+
+Post-launch direction — the value thesis, growth sequence (agent-framework integrations first, capture depth second, team layer only on demonstrated demand), honest risks, and success metrics — lives in `docs/VISION.md`. Read it before proposing new feature work; it exists precisely so that future contributors and agents can tell whether an idea fits the project's actual trajectory.
