@@ -114,7 +114,8 @@ Approvals are pinned to a tool's request shape: re-running `generate` keeps appr
 - [Architecture](docs/ARCHITECTURE.md) — crate layout for contributors
 - [Limitations](docs/LIMITATIONS.md) — what doesn't work yet, and why
 - [Safety & security model](docs/SAFETY_SECURITY.md)
-- [Launch readiness roadmap](docs/ROADMAP.md)
+- [Open-source readiness plan](docs/OPEN_SOURCE_READINESS.md)
+- [Vision and coverage tiers](docs/VISION.md) — where the project is going, what it will and won't bridge
 
 ## Building from source
 
@@ -132,4 +133,4 @@ Or run without installing, prefixing every command with `cargo run -p tapestry-c
 cargo run -p tapestry-cli -- import examples/fixtures/dummyjson-api.har --site demo --generate
 ```
 
-To build and test the workspace itself: `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo fmt --all -- --check` (all three run in CI on every PR).
+To build and test the workspace itself: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check` (all three run in CI on every PR).

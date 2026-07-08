@@ -2536,7 +2536,7 @@ mod tests {
         builder.ingest_message(&json!({
             "method": "Network.requestWillBeSent",
             "params": { "requestId": "1", "request": { "method": "GET",
-                "url": "http://example.com/api/search?limit=10&active=true&score=3.14&q=shoes" } }
+                "url": "http://example.com/api/search?limit=10&active=true&score=2.75&q=shoes" } }
         }));
         builder.ingest_message(&json!({
             "method": "Network.loadingFinished",
@@ -2549,7 +2549,7 @@ mod tests {
         // integers stay as numbers, booleans as bools, floats as floats, strings as strings
         assert_eq!(q["limit"], serde_json::json!(10));
         assert_eq!(q["active"], serde_json::json!(true));
-        assert_eq!(q["score"], serde_json::json!(3.14));
+        assert_eq!(q["score"], serde_json::json!(2.75));
         assert_eq!(q["q"], serde_json::json!("shoes"));
     }
 

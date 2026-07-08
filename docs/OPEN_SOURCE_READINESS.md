@@ -4,7 +4,7 @@ This document is the working plan for taking Tapestry from its current state to 
 
 ## Context: what Tapestry is and where it stands
 
-Tapestry turns captured web app traffic (HAR import or live CDP recording) into structured, safety-gated tools that AI agents consume through four MCP meta-tools (`search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`). Read `docs/PRD.md` for positioning, `docs/ROADMAP.md` for the product gap analysis, and `docs/SAFETY_SECURITY.md` for the security model.
+Tapestry turns captured web app traffic (HAR import or live CDP recording) into structured, safety-gated tools that AI agents consume through four MCP meta-tools (`search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`). Read `docs/PRD.md` for positioning, `docs/archive/ROADMAP.md` for the (closed) product gap analysis, and `docs/SAFETY_SECURITY.md` for the security model.
 
 Already done (do not redo):
 
@@ -105,7 +105,7 @@ Done when: the repo is public, CI badge is green, binaries are downloadable, and
 
 ## Explicitly out of scope for the OSS launch
 
-Per `docs/ROADMAP.md`, do not build these now: anti-bot evasion, OAuth/SSO/MFA automation, team sharing / ToolSpec marketplace, WebSocket/SSE capture, proxy capture, browser extension, HTML fragment tools (Tier 2 — fully designed in `docs/FRAGMENT_TOOLS.md`, but post-launch per the VISION growth sequence). Saying no to these is part of the positioning.
+Do not build these now: anti-bot evasion, OAuth/SSO/MFA automation, team sharing / ToolSpec marketplace, WebSocket/SSE capture, proxy capture, browser extension, HTML fragment tools (Tier 2 — fully designed in `docs/FRAGMENT_TOOLS.md`, but post-launch per the VISION growth sequence). Saying no to these is part of the positioning.
 
 ## After launch
 

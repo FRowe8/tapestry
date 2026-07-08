@@ -1,4 +1,8 @@
-# v0.0 Vertical Slice Plan
+# v0.0 Vertical Slice Plan (archived)
+
+> **Archived July 2026.** This was the original build plan; its success
+> criteria were met long ago. See `docs/ARCHITECTURE.md` for what was
+> actually built.
 
 ## Goal
 

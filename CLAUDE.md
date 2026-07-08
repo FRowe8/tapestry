@@ -20,11 +20,11 @@ meta-tools: `search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`.
   one, never copy one out of `.tapestry-dev/`, never paste their contents
   anywhere. Only synthetic or verified-clean fixtures belong in
   `examples/fixtures/`.
-- **`cargo test --workspace` must pass before every commit** (~191 tests,
-  seconds after first build). Also keep `cargo clippy --workspace -- -D
-  warnings` and `cargo fmt --all -- --check` clean — CI enforces all three on
-  Linux and Windows, and the CI toolchain may be newer than local (a lint that
-  passes locally can still fail CI).
+- **`cargo test --workspace` must pass before every commit** (~200 tests,
+  seconds after first build). Also keep `cargo clippy --workspace
+  --all-targets -- -D warnings` and `cargo fmt --all -- --check` clean — CI
+  enforces all three on Linux and Windows, and the CI toolchain may be newer
+  than local (a lint that passes locally can still fail CI).
 - **Never weaken redaction, approval gates, or safety classification** to make
   a test or demo pass.
 - **The four-meta-tool MCP design is the product.** Do not expose generated

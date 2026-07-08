@@ -1,4 +1,9 @@
-# Launch Readiness Roadmap
+# Launch Readiness Roadmap (archived)
+
+> **Archived July 2026.** Eight of its ten gaps are closed and recorded here
+> for history. The live plans are `docs/OPEN_SOURCE_READINESS.md` (getting to
+> the OSS launch — its Phases 3-5 absorb the open remainders of Gaps 6, 7,
+> and 10) and `docs/VISION.md` (post-launch direction and coverage tiers).
 
 This document lists the gaps between the current vertical slice and something that can be handed to real testers, why each gap matters, and how to close it. It is ordered by priority: items near the top block a pilot launch; items near the bottom improve it.
 

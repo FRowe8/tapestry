@@ -228,7 +228,6 @@ pub(crate) fn format_diagnose_text(report: &DiagnoseReport) -> String {
             f.static_assets, f.consent_or_config, f.bot_or_security, f.third_party_non_api, f.html_fragments
         ),
         String::new(),
-        "Tools:".to_string(),
     ];
     if f.html_fragments > 0 {
         out.push(format!(
@@ -269,6 +268,7 @@ pub(crate) fn format_diagnose_text(report: &DiagnoseReport) -> String {
         out.push(String::new());
     }
 
+    out.push("Tools:".to_string());
     for tool in &report.tools {
         out.push(format!("{}:", tool.name));
         out.push(format!("  Endpoint: {} {}", tool.method, tool.path));

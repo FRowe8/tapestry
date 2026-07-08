@@ -366,6 +366,13 @@ fn main() -> Result<()> {
             );
             info!(command = "import", site, har = %har.display(), "starting HAR import");
             let observations = tapestry_input::import_har(&har)?;
+            // Same early feedback `record` gives: fragment endpoints, missing
+            // bodies, and no-API-traffic captures should be visible at import
+            // time, not discovered after generate.
+            let summary = tapestry_input::CaptureSummary::from_observations(&observations);
+            for warning in summary.capture_warnings() {
+                eprintln!("Warning: {warning}");
+            }
             let source = format!("har:{}", har.display());
             let outcome = store_capture(&site, &source, observations, replace)?;
             println!("{}", format_capture_message(&site, &outcome, "Imported"));

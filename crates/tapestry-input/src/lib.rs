@@ -214,105 +214,6 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn imports_simple_fixture() {
-        let observations = import_har("../../examples/fixtures/simple.har").unwrap();
-
-        assert_eq!(observations.len(), 4);
-        assert!(observations.iter().all(|obs| !obs.method.is_empty()));
-    }
-
-    #[test]
-    fn skips_blank_method_and_non_http_entries_in_browser_fixture() {
-        let observations = import_har("../../examples/fixtures/browser-noise.har").unwrap();
-
-        assert!(!observations.is_empty());
-        assert!(observations.iter().all(|obs| !obs.method.is_empty()));
-        assert!(observations.iter().all(|obs| obs.url.starts_with("http")));
-    }
-
-    #[test]
-    fn no_seeded_secret_survives_har_import() {
-        let observations = import_har("../../examples/fixtures/redaction.har").unwrap();
-        let serialized = serde_json::to_string(&observations).unwrap();
-
-        assert!(
-            !serialized.contains("FAKESECRET"),
-            "a seeded secret leaked into observations: {serialized}"
-        );
-        // Redaction must not have destroyed the useful payload.
-        assert!(serialized.contains("\"title\":\"One\""));
-        assert!(serialized.contains("access_token"));
-        assert!(serialized.contains("\"limit\":5"));
-    }
-
-    #[test]
-    fn secret_query_params_are_redacted_in_url_and_query_map() {
-        let url =
-            Url::parse("http://x.test/api?access_token=tok123&limit=5&sig=abc&q=shoes").unwrap();
-        let redacted_url = redact_url_query(&url);
-        assert!(!redacted_url.contains("tok123"));
-        assert!(!redacted_url.contains("sig=abc"));
-        assert!(redacted_url.contains("limit=5"));
-        assert!(redacted_url.contains("q=shoes"));
-
-        let query = redacted_query_map(&url);
-        assert_eq!(query["access_token"], "<redacted>");
-        assert_eq!(query["sig"], "<redacted>");
-        assert_eq!(query["limit"], 5);
-        assert_eq!(query["q"], "shoes");
-    }
-
-    #[test]
-    fn benign_params_that_contain_secret_substrings_are_not_redacted() {
-        assert!(!is_secret_query_param("author"));
-        assert!(!is_secret_query_param("sortkey"));
-        assert!(!is_secret_query_param("keyword"));
-        assert!(!is_secret_query_param("userId"));
-        assert!(is_secret_query_param("access_token"));
-        assert!(is_secret_query_param("apiKey"));
-        assert!(is_secret_query_param("x-api-key"));
-        assert!(is_secret_query_param("sessionId"));
-    }
-
-    #[test]
-    fn clean_url_query_is_not_re_encoded() {
-        // No secret present: bytes must be preserved so re-import dedup works.
-        let url = Url::parse("http://x.test/api?q=a%20b&sort=name").unwrap();
-        assert_eq!(redact_url_query(&url), url.to_string());
-    }
-
-    #[test]
-    fn har_resource_type_annotation_is_captured() {
-        // Chrome DevTools exports mark XHR-fetched entries with _resourceType;
-        // that signal identifies HTML fragment endpoints we cannot tool yet.
-        let entry = serde_json::json!({
-            "_resourceType": "XHR",
-            "request": {
-                "method": "GET",
-                "url": "http://x.test/products-fragment?q=shoes",
-                "headers": []
-            },
-            "response": {
-                "status": 200,
-                "headers": [{"name": "Content-Type", "value": "text/html; charset=utf-8"}],
-                "content": {"mimeType": "text/html", "text": "<div>items</div>"}
-            }
-        });
-
-        let obs = parse_entry(&entry).unwrap();
-
-        assert_eq!(obs.resource_type.as_deref(), Some("xhr"));
-        assert!(obs.is_html_fragment());
-        // Non-JSON bodies are still dropped at import; only the signal is kept.
-        assert!(obs.response_body.is_none());
-    }
-}
-
 fn redact_entry(entry: &mut Value) {
     if let Some(request_headers) = entry
         .get_mut("request")
@@ -448,5 +349,104 @@ fn infer_scalar(s: &str) -> Value {
         Value::from(b)
     } else {
         Value::from(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imports_simple_fixture() {
+        let observations = import_har("../../examples/fixtures/simple.har").unwrap();
+
+        assert_eq!(observations.len(), 4);
+        assert!(observations.iter().all(|obs| !obs.method.is_empty()));
+    }
+
+    #[test]
+    fn skips_blank_method_and_non_http_entries_in_browser_fixture() {
+        let observations = import_har("../../examples/fixtures/browser-noise.har").unwrap();
+
+        assert!(!observations.is_empty());
+        assert!(observations.iter().all(|obs| !obs.method.is_empty()));
+        assert!(observations.iter().all(|obs| obs.url.starts_with("http")));
+    }
+
+    #[test]
+    fn no_seeded_secret_survives_har_import() {
+        let observations = import_har("../../examples/fixtures/redaction.har").unwrap();
+        let serialized = serde_json::to_string(&observations).unwrap();
+
+        assert!(
+            !serialized.contains("FAKESECRET"),
+            "a seeded secret leaked into observations: {serialized}"
+        );
+        // Redaction must not have destroyed the useful payload.
+        assert!(serialized.contains("\"title\":\"One\""));
+        assert!(serialized.contains("access_token"));
+        assert!(serialized.contains("\"limit\":5"));
+    }
+
+    #[test]
+    fn secret_query_params_are_redacted_in_url_and_query_map() {
+        let url =
+            Url::parse("http://x.test/api?access_token=tok123&limit=5&sig=abc&q=shoes").unwrap();
+        let redacted_url = redact_url_query(&url);
+        assert!(!redacted_url.contains("tok123"));
+        assert!(!redacted_url.contains("sig=abc"));
+        assert!(redacted_url.contains("limit=5"));
+        assert!(redacted_url.contains("q=shoes"));
+
+        let query = redacted_query_map(&url);
+        assert_eq!(query["access_token"], "<redacted>");
+        assert_eq!(query["sig"], "<redacted>");
+        assert_eq!(query["limit"], 5);
+        assert_eq!(query["q"], "shoes");
+    }
+
+    #[test]
+    fn benign_params_that_contain_secret_substrings_are_not_redacted() {
+        assert!(!is_secret_query_param("author"));
+        assert!(!is_secret_query_param("sortkey"));
+        assert!(!is_secret_query_param("keyword"));
+        assert!(!is_secret_query_param("userId"));
+        assert!(is_secret_query_param("access_token"));
+        assert!(is_secret_query_param("apiKey"));
+        assert!(is_secret_query_param("x-api-key"));
+        assert!(is_secret_query_param("sessionId"));
+    }
+
+    #[test]
+    fn clean_url_query_is_not_re_encoded() {
+        // No secret present: bytes must be preserved so re-import dedup works.
+        let url = Url::parse("http://x.test/api?q=a%20b&sort=name").unwrap();
+        assert_eq!(redact_url_query(&url), url.to_string());
+    }
+
+    #[test]
+    fn har_resource_type_annotation_is_captured() {
+        // Chrome DevTools exports mark XHR-fetched entries with _resourceType;
+        // that signal identifies HTML fragment endpoints we cannot tool yet.
+        let entry = serde_json::json!({
+            "_resourceType": "XHR",
+            "request": {
+                "method": "GET",
+                "url": "http://x.test/products-fragment?q=shoes",
+                "headers": []
+            },
+            "response": {
+                "status": 200,
+                "headers": [{"name": "Content-Type", "value": "text/html; charset=utf-8"}],
+                "content": {"mimeType": "text/html", "text": "<div>items</div>"}
+            }
+        });
+
+        let obs = parse_entry(&entry).unwrap();
+
+        assert_eq!(obs.resource_type.as_deref(), Some("xhr"));
+        assert!(obs.is_html_fragment());
+        // Non-JSON bodies are still dropped at import; only the signal is kept.
+        assert!(obs.response_body.is_none());
     }
 }

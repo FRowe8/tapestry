@@ -2254,7 +2254,7 @@ mod tests {
         let tool = &spec.tools[0];
 
         assert_eq!(tool.name, "taxonomy");
-        assert_eq!(tool.graphql.as_ref().unwrap().batched, true);
+        assert!(tool.graphql.as_ref().unwrap().batched);
         assert!(tool
             .warnings
             .iter()

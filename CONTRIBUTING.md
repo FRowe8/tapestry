@@ -16,7 +16,7 @@ Tapestry pins the Rust toolchain in `rust-toolchain.toml`.
 
 ```bash
 cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
