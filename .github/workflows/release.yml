@@ -33,10 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # rustup reads rust-toolchain.toml, so the pin file stays the single
+      # source of truth; the cross-compilation target is per-matrix.
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          targets: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
