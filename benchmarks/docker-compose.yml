@@ -1,0 +1,32 @@
+# Self-hosted benchmark apps (readiness plan Phase 4).
+#
+# Versions are pinned so benchmark results are reproducible; bump them
+# deliberately, as their own commit, and re-run the suite when you do.
+# Both services bind to 127.0.0.1 only — these are throwaway instances with
+# well-known credentials (seeded by run.py) and must never listen publicly.
+
+services:
+  nocodb:
+    image: nocodb/nocodb:0.204.0
+    container_name: tapestry-bench-nocodb
+    ports:
+      - "127.0.0.1:8980:8080"
+    environment:
+      NC_DISABLE_TELE: "true"
+    volumes:
+      - nocodb-data:/usr/app/data
+
+  ghost:
+    image: ghost:5.75.1
+    container_name: tapestry-bench-ghost
+    ports:
+      - "127.0.0.1:8981:2368"
+    environment:
+      url: http://127.0.0.1:8981
+      NODE_ENV: development
+    volumes:
+      - ghost-data:/var/lib/ghost/content
+
+volumes:
+  nocodb-data:
+  ghost-data:

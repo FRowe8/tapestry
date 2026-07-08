@@ -64,12 +64,12 @@ Done when: every parity pair in the benchmark either passes "CDP meets HAR" or h
 
 ## Phase 4 — Self-hosted benchmark suite (product Gap 6)
 
-- [ ] **`benchmarks/` directory** with a pinned docker-compose for two apps to start: NocoDB and Ghost (add Directus/Strapi later). Fixed versions, seeded demo data.
-- [ ] **One-command run**: script that captures (headless CDP against the compose apps), generates, validates, and runs `agent-task`, then reports the four metrics from `docs/BENCHMARKS.md` (callability >=70%, task completion >=60%, time-to-first-tool, manual correction rate <30%).
-- [ ] **Wire into benchmark_cases.json** with `expected_endpoints` ground truth so capture parity is scored against reality, not just HAR-vs-CDP agreement.
-- [ ] Retail-site stress tests stay private (they need the maintainer's local `.tapestry-dev/private-fixtures/`); the public suite is self-hosted apps only.
+- [x] **`benchmarks/` directory** with a pinned docker-compose for two apps to start: NocoDB and Ghost (add Directus/Strapi later). Fixed versions (NocoDB 0.204.0, Ghost 5.75.1, localhost-only), seeded over each app's HTTP API by the runner. **Not yet verified against real containers** — built and reviewed on a machine without Docker; the first `docker compose up` run may need seeding/API adjustments.
+- [x] **One-command run**: `python benchmarks/run.py` seeds each app, captures headlessly via a same-site driver page (documented in `benchmarks/README.md`), generates, approves writes, and reports the four metrics from `docs/BENCHMARKS.md`. Proven end-to-end without Docker via `--apps localapp`: 100% callability, 100% task completion, 31s time-to-first-tool, 0% correction rate. (This run also exposed and fixed a real analyzer bug: pagination position params were required-with-no-default, unbuildable by agents.) Ghost is expected to fail live callability on keyed endpoints — its Content API authenticates via query param, which redaction strips and the credential store cannot inject; kept deliberately as a documented product gap.
+- [x] **Wire into benchmark_cases.json** with `expected_endpoints` ground truth so capture parity is scored against reality, not just HAR-vs-CDP agreement (`bench-nocodb`, `bench-ghost` cases).
+- [x] Retail-site stress tests stay private (they need the maintainer's local `.tapestry-dev/private-fixtures/`); the public suite is self-hosted apps only.
 
-Done when: `docker compose up` + one script produces the four metrics against two pinned apps from a clean checkout.
+Done when: `docker compose up` + one script produces the four metrics against two pinned apps from a clean checkout. **Remaining:** run the suite once on a machine with Docker and fix whatever the first real NocoDB/Ghost run surfaces.
 
 ## Phase 5 — Real-agent measurement (product Gap 7 remainder)
 

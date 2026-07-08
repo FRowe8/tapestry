@@ -1,5 +1,6 @@
 target/
 .tapestry-dev/
+benchmarks/results/
 .env
 *.log
 .DS_Store

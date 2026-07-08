@@ -81,5 +81,31 @@
     "task": "Search for properties",
     "expected_outcome": "missing_required_argument",
     "expected_tool": "search_listing"
+  },
+  {
+    "site": "bench-nocodb",
+    "capture_variant": "cdp",
+    "task": "List the records in the Items table",
+    "expected_outcome": "success",
+    "expected_endpoints": [
+      "/api/v2/meta/bases",
+      "/api/v2/meta/bases/{baseId}/tables",
+      "/api/v2/tables/{tableId}/records",
+      "/api/v2/tables/{tableId}/records/{recordId}",
+      "/api/v2/tables/{tableId}/records/count"
+    ]
+  },
+  {
+    "site": "bench-ghost",
+    "capture_variant": "cdp",
+    "task": "List the most recent posts",
+    "expected_outcome": "success",
+    "expected_endpoints": [
+      "/ghost/api/content/posts/",
+      "/ghost/api/content/posts/{postId}/",
+      "/ghost/api/content/settings/",
+      "/ghost/api/content/tags/",
+      "/members/api/site"
+    ]
   }
 ]

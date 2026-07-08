@@ -1153,10 +1153,12 @@ fn benchmark_suite_freezes_expected_sites_and_tasks() {
         .map(|case| case.site.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(cases.len(), 13);
+    assert_eq!(cases.len(), 15);
     assert!(sites.contains(&"tesco"));
     assert!(sites.contains(&"localapp"));
     assert!(sites.contains(&"localapp-cdp"));
+    assert!(sites.contains(&"bench-nocodb"));
+    assert!(sites.contains(&"bench-ghost"));
     assert!(sites.contains(&"justkandy"));
     assert!(sites.contains(&"justkandy-cdp"));
     assert!(sites.contains(&"melvor"));
