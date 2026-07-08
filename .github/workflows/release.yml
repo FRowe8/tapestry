@@ -31,7 +31,7 @@ jobs:
             target: aarch64-apple-darwin
             archive_ext: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup reads rust-toolchain.toml, so the pin file stays the single
       # source of truth; the cross-compilation target is per-matrix.
