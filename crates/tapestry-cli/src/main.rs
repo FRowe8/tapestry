@@ -19,7 +19,7 @@ use commands::validate::*;
 use support::*;
 
 #[derive(Parser)]
-#[command(name = "tapestry")]
+#[command(name = "tapestry", version)]
 #[command(about = "Turn captured web app traffic into low-token agent tools")]
 #[command(
     after_help = "Examples:\n  tapestry import examples/fixtures/simple.har --site demo\n  tapestry generate demo\n  tapestry record https://example.com --site demo\n  tapestry agent-task demo \"List the most recent 5 items\"\n  tapestry review demo\n  tapestry diagnose demo\n  tapestry benchmark"
