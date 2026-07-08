@@ -11,4 +11,4 @@ serde_json.workspace = true
 url.workspace = true
 tapestry-core = { path = "../tapestry-core" }
 base64.workspace = true
-ureq = "2"
+ureq = "3"

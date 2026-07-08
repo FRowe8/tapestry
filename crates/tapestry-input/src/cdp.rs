@@ -957,9 +957,9 @@ fn wait_for_page_target(port: u16, timeout: Duration) -> Result<String> {
     let list_url = format!("http://127.0.0.1:{port}/json/list");
     loop {
         if let Ok(response) = ureq::get(&list_url).call() {
-            if let Ok(targets) =
-                serde_json::from_reader::<_, Vec<DevToolsTarget>>(response.into_reader())
-            {
+            if let Ok(targets) = serde_json::from_reader::<_, Vec<DevToolsTarget>>(
+                response.into_body().into_reader(),
+            ) {
                 if let Some(ws_url) = targets
                     .into_iter()
                     .filter(|t| t.target_type.as_deref() == Some("page"))

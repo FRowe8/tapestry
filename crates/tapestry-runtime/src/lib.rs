@@ -904,10 +904,10 @@ fn execute_paginated_request(
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
-fn read_response_body(response: ureq::Response) -> Option<String> {
+fn read_response_body(response: ureq::http::Response<ureq::Body>) -> Option<String> {
     use std::io::Read;
     let mut buf = Vec::with_capacity(4096);
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
@@ -931,28 +931,37 @@ fn execute_single_request(
     options: &RuntimeOptions,
 ) -> std::result::Result<Value, String> {
     let url = build_url(base_url, request)?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(options.request_timeout_secs))
-        .build();
-    let mut req = agent.request(&request.method, url.as_str());
+    // Non-2xx responses must come back as Ok so their bodies stay readable
+    // for handle_error_status; only transport failures are Err.
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(options.request_timeout_secs)))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut builder = ureq::http::Request::builder()
+        .method(request.method.as_str())
+        .uri(url.as_str());
     for (name, value) in &options.credentials {
-        req = req.set(name, value);
+        builder = builder.header(name.as_str(), value.as_str());
     }
 
     let response = if let Some(body) = &request.body {
-        req.set("content-type", "application/json")
-            .send_json(body.clone())
+        let payload = serde_json::to_string(body).map_err(|error| error.to_string())?;
+        let req = builder
+            .header("content-type", "application/json")
+            .body(payload)
+            .map_err(|error| error.to_string())?;
+        agent.run(req)
     } else {
-        req.call()
+        let req = builder.body(()).map_err(|error| error.to_string())?;
+        agent.run(req)
     };
 
     match response {
-        Ok(response) => handle_http_response(tool, response.status(), read_response_body(response)),
-        Err(ureq::Error::Status(status, response)) => Ok(handle_error_status(
-            status,
-            read_response_body(response),
-            tool,
-        )),
+        Ok(response) => {
+            let status = response.status().as_u16();
+            handle_http_response(tool, status, read_response_body(response))
+        }
         Err(error) => Err(error.to_string()),
     }
 }

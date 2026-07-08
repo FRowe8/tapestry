@@ -11,7 +11,7 @@ serde_json.workspace = true
 tracing.workspace = true
 url.workspace = true
 tapestry-core = { path = "../tapestry-core" }
-ureq = { version = "2", features = ["json"] }
+ureq = "3"
 
 [dev-dependencies]
 tapestry-analyzer = { path = "../tapestry-analyzer" }
