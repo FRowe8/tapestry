@@ -105,7 +105,7 @@ Done when: the repo is public, CI badge is green, binaries are downloadable, and
 
 ## Explicitly out of scope for the OSS launch
 
-Per `docs/ROADMAP.md`, do not build these now: anti-bot evasion, OAuth/SSO/MFA automation, team sharing / ToolSpec marketplace, WebSocket/SSE capture, proxy capture, browser extension. Saying no to these is part of the positioning.
+Per `docs/ROADMAP.md`, do not build these now: anti-bot evasion, OAuth/SSO/MFA automation, team sharing / ToolSpec marketplace, WebSocket/SSE capture, proxy capture, browser extension, HTML fragment tools (Tier 2 — fully designed in `docs/FRAGMENT_TOOLS.md`, but post-launch per the VISION growth sequence). Saying no to these is part of the positioning.
 
 ## After launch
 

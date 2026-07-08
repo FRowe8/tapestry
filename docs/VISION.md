@@ -31,6 +31,42 @@ context windows grow. It is **determinism, auditability, and the safety
 pipeline**. Those matter most exactly where browser-driving agents are least
 acceptable: businesses automating real operations on systems of record.
 
+## Coverage tiers: what Tapestry bridges, and what it deliberately doesn't
+
+Websites serve data in more ways than JSON APIs, and "why can't my agent use
+this site?" is the demand Tapestry exists to answer. But not every delivery
+mode can be bridged without destroying the properties (determinism,
+auditability, redaction) that make Tapestry worth using. The official
+position is a three-tier model; a site's tier is a property of how it serves
+data, not a roadmap promise:
+
+- **Tier 1 — structured APIs (today, full guarantees).** JSON/REST and
+  GraphQL endpoints get the whole pipeline: inferred schemas in both
+  directions, structural redaction, safety classification, evidence, drift
+  detection.
+- **Tier 2 — fragment endpoints (planned, request-side guarantees).** Some
+  sites fetch server-rendered HTML fragments over XHR for their listing and
+  search flows (e.g. `next.co.uk`'s `/products-fragment`). The *request* side
+  is exactly as structured as a JSON API — inferable input schema, replayable
+  auth, method-based safety class — only the response is unstructured.
+  Tapestry will tool these: size-capped, text-redacted HTML responses,
+  explicitly labeled low-confidence and approval-gated, behind an opt-in.
+  The scoped design (including the redaction model) is
+  `docs/FRAGMENT_TOOLS.md`; it ships post-launch under growth step 3's
+  evidence rule. Until then the pipeline detects fragments and reports them
+  in capture warnings and `diagnose` rather than failing silently.
+- **Tier 3 — page scraping (never).** Sites with no XHR data traffic at all,
+  where data exists only inside full page HTML. Bridging those means DOM
+  extraction and browser puppeteering: brittle per-site logic, no meaningful
+  safety classification, no redaction story, and a crowded field
+  (computer-use and browser-use agents) where Tapestry adds nothing. The
+  answer there is *pairing* Tapestry with a browser-automation agent — hot
+  path through captured tools, cold path through the browser — and the docs
+  say so plainly instead of implying Tapestry will absorb that job.
+
+The tier boundary protects the thesis: every mode Tapestry supports must
+keep the safety pipeline honest, or the differentiator dissolves.
+
 ## The OpenClaw lesson (and why we are not OpenClaw)
 
 OpenClaw (the viral open-source personal assistant) demonstrated what makes an
@@ -78,10 +114,12 @@ leverage growth after launch:
 
 **3. Deepen capture (only where testers actually hit walls).** Candidate
 order, driven by pilot feedback, not speculation: streamed-response bodies
-(`Network.streamResourceContent`), browser-extension capture (records from
-the user's real browser — removes login/profile friction entirely), proxy
-capture for native/mobile clients, WebSocket/SSE. Each of these is listed as
-deliberately-not-now in the PRD; they graduate only on evidence.
+(`Network.streamResourceContent`), HTML fragment tools (Tier 2 — designed in
+`docs/FRAGMENT_TOOLS.md`, the largest coverage win available), browser-
+extension capture (records from the user's real browser — removes
+login/profile friction entirely), proxy capture for native/mobile clients,
+WebSocket/SSE. Each of these is listed as deliberately-not-now in the PRD;
+they graduate only on evidence.
 
 **4. The team layer (the commercial option).** The single-user local loop
 stays free and open source, permanently — it is the trust foundation. If (and
