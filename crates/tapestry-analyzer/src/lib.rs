@@ -620,7 +620,13 @@ fn infer_input_schema(
         let schema =
             schema_for_optional_values(&format!("query.{name}"), &values, total, true, warnings);
         let present = values.iter().filter(|value| value.is_some()).count();
-        if present == total {
+        // Pagination position params are never required, for the same reason
+        // maybe_insert_default refuses them a default: the captured position
+        // is where the user happened to be, not part of the API contract.
+        // Requiring them strands agents with a parameter that has no example,
+        // no default, and no derivable value; omitting one means "first page"
+        // on any reasonable API.
+        if present == total && !is_pagination_position_param(&name) {
             required.push(Value::String(name.clone()));
         } else if present == 1 {
             warnings.seen_once(&format!("query.{name}"));
@@ -2020,6 +2026,33 @@ mod tests {
     }
 
     #[test]
+    fn pagination_positions_never_become_required() {
+        // Companion to the no-default rule: a position param that is also
+        // required (no default, no example) is unbuildable by any agent.
+        // Omitting it means "first page" on any reasonable API.
+        let observations = [observation(
+            "GET",
+            "https://app.test/api/items?page=1&limit=5",
+            None,
+            None,
+        )];
+        let refs: Vec<&Observation> = observations.iter().collect();
+        let mut warnings = InferenceWarnings::new(observations.len());
+        let (schema, _) = infer_input_schema(&refs, &[], "GET", "GET /api/items", &mut warnings);
+
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(required.contains(&"limit"));
+        assert!(!required.contains(&"page"));
+        // The param itself still exists in the schema for agents that want it.
+        assert_eq!(schema["properties"]["page"]["type"], "integer");
+    }
+
+    #[test]
     fn trailing_search_verb_names_tool_after_resource() {
         assert_eq!(
             tool_name("GET", "/products/search", "", &[]),
@@ -2480,16 +2513,20 @@ mod tests {
 
     #[test]
     fn query_params_are_typed_required_optional_and_warn_when_seen_once() {
+        // `q` appears in every observation -> required; `limit` appears once
+        // -> optional with a seen-once warning; `page` appears in every
+        // observation but is a pagination position, which never becomes
+        // required (see pagination_positions_never_become_required).
         let observations = vec![
             observation(
                 "GET",
-                "https://app.test/api/items?page=1&limit=5",
+                "https://app.test/api/items?q=shoes&page=1&limit=5",
                 None,
                 Some(json!({"items": []})),
             ),
             observation(
                 "GET",
-                "https://app.test/api/items?page=2",
+                "https://app.test/api/items?q=boots&page=2",
                 None,
                 Some(json!({"items": []})),
             ),
@@ -2500,14 +2537,11 @@ mod tests {
 
         assert_eq!(tool.input_schema["properties"]["page"]["type"], "integer");
         assert_eq!(tool.input_schema["properties"]["limit"]["type"], "integer");
-        assert!(tool.input_schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("page")));
-        assert!(!tool.input_schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("limit")));
+        assert_eq!(tool.input_schema["properties"]["q"]["type"], "string");
+        let required = tool.input_schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("q")));
+        assert!(!required.contains(&json!("page")));
+        assert!(!required.contains(&json!("limit")));
         assert_eq!(tool.input_schema["properties"]["limit"]["optional"], true);
         assert!(tool
             .warnings
