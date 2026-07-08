@@ -1050,11 +1050,12 @@ fn handle_error_status(status: u16, body: Option<String>, tool: &ToolDefinition)
         ),
         _ => {
             // Error bodies can echo credentials back (e.g. "invalid token:
-            // ..."); mask JSON fields before quoting the snippet.
+            // ..."); mask JSON fields, and token-shaped strings in non-JSON
+            // bodies, before quoting the snippet.
             let body = body.unwrap_or_default();
             let snippet = match serde_json::from_str::<Value>(&body) {
                 Ok(json) => tapestry_core::redact_sensitive_fields(json).to_string(),
-                Err(_) => body,
+                Err(_) => tapestry_core::mask_token_like(&body),
             };
             runtime_error(
                 "endpoint_error",
@@ -2022,6 +2023,26 @@ mod tests {
 
         assert_eq!(response["error_type"], "endpoint_error");
         assert_eq!(response["http_status"], 500);
+    }
+
+    #[test]
+    fn non_json_error_snippets_mask_token_shapes() {
+        let tool = tool(
+            "list_items",
+            "GET",
+            "/api/items",
+            true,
+            SafetyClassification::Read,
+        );
+        let body =
+            "invalid session eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig12345 please reauthenticate";
+
+        let response = handle_error_status(500, Some(body.to_string()), &tool);
+        let snippet = response["details"]["body"].as_str().unwrap();
+
+        assert!(!snippet.contains("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(snippet.contains("<redacted>"));
+        assert!(snippet.contains("please reauthenticate"));
     }
 
     #[test]

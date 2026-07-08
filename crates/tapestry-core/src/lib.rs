@@ -282,6 +282,68 @@ pub fn redact_sensitive_fields(value: Value) -> Value {
     }
 }
 
+/// Mask token-shaped substrings in free text: JWTs, `Bearer <token>` values,
+/// long hex digests, and dense base64-like runs. Complements
+/// `redact_sensitive_fields`, which only works on structured JSON — this is
+/// the guard for text that has no field names (non-JSON error bodies today;
+/// HTML fragment bodies in the Tier 2 design). Heuristic by nature: it
+/// catches credential *shapes*, not every possible secret.
+pub fn mask_token_like(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let mut previous_word_was_bearer = false;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '=' | '+' | '/') {
+            word.push(ch);
+        } else {
+            previous_word_was_bearer = flush_masked(&mut out, &mut word, previous_word_was_bearer);
+            out.push(ch);
+        }
+    }
+    flush_masked(&mut out, &mut word, previous_word_was_bearer);
+    out
+}
+
+fn flush_masked(out: &mut String, word: &mut String, after_bearer: bool) -> bool {
+    if word.is_empty() {
+        return after_bearer;
+    }
+    let is_bearer_keyword = word.eq_ignore_ascii_case("bearer");
+    if (after_bearer && word.len() >= 8) || looks_token_like(word) {
+        out.push_str("<redacted>");
+    } else {
+        out.push_str(word);
+    }
+    word.clear();
+    is_bearer_keyword
+}
+
+fn looks_token_like(word: &str) -> bool {
+    // JWT: three dot-separated base64url segments starting with header "eyJ".
+    if word.starts_with("eyJ") && word.matches('.').count() >= 2 {
+        return true;
+    }
+    // Long hex digest/token (sha256 hex is 64, session ids commonly 32+).
+    if word.len() >= 32
+        && word.chars().all(|c| c.is_ascii_hexdigit())
+        && word.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return true;
+    }
+    // Dense base64-ish run: long, only token alphabet, mixed upper/lower/digit.
+    if word.len() >= 24
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '=' | '+' | '/'))
+    {
+        let upper = word.chars().filter(|c| c.is_ascii_uppercase()).count();
+        let lower = word.chars().filter(|c| c.is_ascii_lowercase()).count();
+        let digits = word.chars().filter(|c| c.is_ascii_digit()).count();
+        return upper >= 3 && lower >= 3 && digits >= 3;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +376,33 @@ mod tests {
         // Plain navigations are pages, not fragments.
         assert!(!observation(Some("document"), "text/html").is_html_fragment());
         assert!(!observation(None, "text/html").is_html_fragment());
+    }
+
+    #[test]
+    fn mask_token_like_masks_credential_shapes_and_keeps_prose() {
+        // JWT
+        assert_eq!(
+            mask_token_like("invalid token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def"),
+            "invalid token: <redacted>"
+        );
+        // Bearer value (even a short opaque one)
+        assert_eq!(
+            mask_token_like("Authorization Bearer sk-live-4242 rejected"),
+            "Authorization Bearer <redacted> rejected"
+        );
+        // Long hex session id
+        assert_eq!(
+            mask_token_like("session deadbeefcafe1234deadbeefcafe1234 expired"),
+            "session <redacted> expired"
+        );
+        // Dense base64-ish API key
+        assert_eq!(
+            mask_token_like("key AbC1dEf2GhI3jKl4MnO5pQr6StU7 is not valid"),
+            "key <redacted> is not valid"
+        );
+        // Ordinary prose, URLs, and error codes survive untouched.
+        let prose = "Rate limit exceeded, see https://docs.example.com/errors/rate-limits (code RATE_LIMIT_429)";
+        assert_eq!(mask_token_like(prose), prose);
     }
 
     #[test]
