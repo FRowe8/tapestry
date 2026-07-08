@@ -11,20 +11,6 @@
     "expected_tool": "taxonomy"
   },
   {
-    "site": "next",
-    "parity_group": "next",
-    "task": "Search for products",
-    "expected_outcome": "success",
-    "expected_tool": "list_index.json"
-  },
-  {
-    "site": "next-cdp",
-    "capture_variant": "cdp",
-    "parity_group": "next",
-    "task": "Search for products",
-    "expected_outcome": "no_matching_tool"
-  },
-  {
     "site": "justkandy",
     "parity_group": "justkandy",
     "task": "cart checkout basket",

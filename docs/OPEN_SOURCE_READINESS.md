@@ -28,9 +28,9 @@ Already done (do not redo):
 - [x] **Fix existing clippy warnings** so `-D warnings` is honest (there are a handful of pre-existing ones: derivable impls, needless refs, `Iterator::last` on double-ended iterators).
 - [x] **Branch hygiene.** `master` is the default branch and is current. Delete or archive the `phase2-cdp-comparison` branch once its content is confirmed merged (it already is; the branch is historical).
 - [ ] **Delete `FRowe8/tapestry-archive-prehistory`** once the maintainer confirms nothing else is needed from it. It contains personal data in its history and must never be made public. (Requires the maintainer: `gh auth refresh -s delete_repo` then `gh repo delete FRowe8/tapestry-archive-prehistory`.)
-- [ ] **Pin the Rust toolchain.** Add `rust-toolchain.toml` pinning a specific stable (match whatever the CI runners currently ship, e.g. `1.96.0`) so local and CI use identical rustc/clippy. Motivation: a lint that passed on local 1.93 failed on the runners' 1.96 the day CI landed. Update the pin deliberately, as its own commit, when new lints are triaged.
-- [ ] **Dependency security in CI.** Add a `cargo audit` job (advisory DB scan) and enable Dependabot (or Renovate) for cargo updates. A credential-handling tool must be seen to take supply-chain security seriously; this is also a Phase 7 launch expectation.
-- [ ] **Remove `prompts/` and `.codex/`.** These are the internal scaffolding prompts from the original build (`.codex/INSTRUCTIONS.md` still says "Do not build: MCP server", which is now false). They will confuse public newcomers; git history preserves them. Remove both directories in one commit.
+- [x] **Pin the Rust toolchain.** Added `rust-toolchain.toml` and switched CI/release workflows to install the pinned toolchain instead of floating `stable`, so local and CI use the same rustc/clippy unless the pin is changed deliberately.
+- [x] **Dependency security in CI.** Added a `cargo audit` job to CI and enabled Dependabot for cargo and GitHub Actions updates.
+- [x] **Remove `prompts/` and `.codex/`.** Removed the internal scaffolding prompts so public contributors no longer see stale build instructions.
 
 Done when: CI (including audit) is green on master, clippy is clean, the toolchain is pinned, the scaffolding dirs are gone, and the archive repo is deleted.
 
@@ -56,7 +56,7 @@ Done when: no source file exceeds ~1,500 lines, CI still green.
 
 ## Phase 3 — Close the capture story (product Gap 10 remainder)
 
-- [ ] **Re-record the two real-site CDP captures** (`next`, `justkandy`) with the fixed recorder, or retire those parity pairs from `crates/tapestry-cli/benchmark_cases.json` and rely on the self-hosted suite (Phase 4) for the parity gate. The current pairs compare against empty pre-fix captures and measure nothing. Requires a human to browse during recording — coordinate with the maintainer, or retire the pairs.
+- [ ] **Re-record the remaining real-site CDP capture** (`justkandy`), or retire that parity pair from `crates/tapestry-cli/benchmark_cases.json` and rely on the self-hosted suite (Phase 4) for the parity gate. `next` was deliberately retired after investigation: its live listing/search flow uses `GET /products-fragment` HTML fragment responses (`text/html`, not JSON), CDP did not capture those fragment bodies reliably, and the analyzer currently filters non-API HTML fragment endpoints as page-like noise. Keep `next` as a documented limitation/example, not a parity gate. Requires a human to browse during recording — coordinate with the maintainer, or retire the remaining pair.
 - [x] **Document the streamed-response limitation** in `docs/LIMITATIONS.md`: chunked/streamed bodies (e.g. Google `batchexecute`) fail `Network.getResponseBody` and are recorded with the `cdp_response_body_unavailable` warning. Candidate future fix: `Network.streamResourceContent`.
 - [ ] **README recommendation.** Only after the parity gate passes may the README recommend `tapestry record` over DevTools HAR export; until then it presents both neutrally.
 
@@ -81,8 +81,8 @@ Done when: BENCHMARKS.md contains a real-agent results table produced by a repro
 
 ## Phase 6 — Community scaffolding
 
-- [ ] **CONTRIBUTING.md**: build instructions, test instructions, the hard rules from this document (especially the HAR-secrecy rule), PR expectations (tests for behavior changes), and the "capture fixtures must be synthetic" policy.
-- [ ] **SECURITY.md**: private vulnerability reporting path (GitHub security advisories), scope statement (credential handling, redaction, approval gates are all security surface).
+- [x] **CONTRIBUTING.md**: build instructions, test instructions, the hard rules from this document (especially the HAR-secrecy rule), PR expectations (tests for behavior changes), and the "capture fixtures must be synthetic" policy.
+- [x] **SECURITY.md**: private vulnerability reporting path (GitHub security advisories), scope statement (credential handling, redaction, approval gates are all security surface).
 - [ ] **Issue templates**: bug report (require `tapestry doctor` output; forbid attaching real HARs — ask for `tapestry redact`ed or synthetic reproductions), feature request, capture-quality report.
 - [ ] **Decide crates.io publishing.** Check name availability for the five crates; publishing is optional at launch but reserve names early if desired.
 - [ ] **README positioning section**: what Tapestry is for (internal, self-hosted, B2B apps), what it is explicitly not for (consumer sites with bot defense, ToS-hostile automation, CAPTCHA bypass), and the safety model in three sentences. The safety-first stance is the project's differentiator — lead with it.
