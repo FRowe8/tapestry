@@ -255,6 +255,7 @@ fn record_summary_includes_capture_quality_metrics() {
             response_status: Some(200),
             response_headers: Default::default(),
             response_body: Some(json!({"items":[{"id":1}]})),
+            resource_type: None,
             warnings: vec![],
         },
         Observation {
@@ -267,6 +268,7 @@ fn record_summary_includes_capture_quality_metrics() {
             response_status: Some(200),
             response_headers: Default::default(),
             response_body: None,
+            resource_type: None,
             warnings: vec![],
         },
     ];
@@ -300,6 +302,7 @@ fn record_low_signal_failure_requires_minimum_api_observations() {
         response_status: Some(200),
         response_headers: Default::default(),
         response_body: None,
+        resource_type: None,
         warnings: vec![],
     }];
     let summary = tapestry_input::CaptureSummary::from_observations(&observations);
@@ -869,6 +872,28 @@ fn diagnose_counts_json_response_body() {
     assert_eq!(report.summary.json_responses, 1);
     assert_eq!(report.summary.observations_with_response_bodies, 1);
     assert!(!report.tools[0].response_schema_empty);
+}
+
+#[test]
+fn diagnose_reports_html_fragment_endpoints() {
+    let mut fragment = observation(
+        "GET",
+        "https://shop.test/products-fragment?q=shoes",
+        None,
+        None,
+    );
+    fragment.response_headers.insert(
+        "content-type".to_string(),
+        "text/html; charset=utf-8".to_string(),
+    );
+    fragment.resource_type = Some("xhr".to_string());
+
+    let report = diagnose_site(&spec(vec![list_tool()]), &[fragment]);
+    let output = format_diagnose_text(&report);
+
+    assert_eq!(report.filtered_counts.html_fragments, 1);
+    assert!(output.contains("html-fragments=1"));
+    assert!(output.contains("HTML fragment endpoints"));
 }
 
 #[test]
@@ -1835,6 +1860,7 @@ fn observation(
             })
             .unwrap_or_default(),
         response_body,
+        resource_type: None,
         warnings: vec![],
     }
 }

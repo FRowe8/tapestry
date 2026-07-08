@@ -78,6 +78,7 @@ pub struct CaptureSummary {
     pub observations_with_response_bodies: usize,
     pub json_responses: usize,
     pub graphql_requests: usize,
+    pub html_fragment_endpoints: usize,
 }
 
 impl CaptureSummary {
@@ -99,6 +100,10 @@ impl CaptureSummary {
             graphql_requests: observations
                 .iter()
                 .filter(|obs| !graphql_operations(obs).is_empty())
+                .count(),
+            html_fragment_endpoints: observations
+                .iter()
+                .filter(|obs| obs.is_html_fragment())
                 .count(),
         }
     }
@@ -150,28 +155,31 @@ impl CaptureSummary {
             return vec![empty_capture_warning()];
         }
 
-        if self.candidate_api_observations == 0 {
-            return vec![no_api_traffic_warning()];
-        }
-
         let mut warnings = Vec::new();
-        if self.response_body_coverage() < 0.30 {
-            warnings.push(format!(
-                "Low response-body coverage: {:.0}%. Capture more requests with responses.",
-                self.response_body_coverage() * 100.0
-            ));
+        if self.candidate_api_observations == 0 {
+            warnings.push(no_api_traffic_warning());
+        } else {
+            if self.response_body_coverage() < 0.30 {
+                warnings.push(format!(
+                    "Low response-body coverage: {:.0}%. Capture more requests with responses.",
+                    self.response_body_coverage() * 100.0
+                ));
+            }
+            if self.json_responses == 0 {
+                warnings.push(
+                    "No JSON responses were captured. Re-capture with a focused API workflow."
+                        .to_string(),
+                );
+            }
+            if self.replayable_tool_hint() == 0 {
+                warnings.push(
+                    "No replayable tools were captured. Capture requests and their responses."
+                        .to_string(),
+                );
+            }
         }
-        if self.json_responses == 0 {
-            warnings.push(
-                "No JSON responses were captured. Re-capture with a focused API workflow."
-                    .to_string(),
-            );
-        }
-        if self.replayable_tool_hint() == 0 {
-            warnings.push(
-                "No replayable tools were captured. Capture requests and their responses."
-                    .to_string(),
-            );
+        if self.html_fragment_endpoints > 0 {
+            warnings.push(html_fragment_warning(self.html_fragment_endpoints));
         }
         warnings
     }
@@ -206,6 +214,12 @@ fn empty_capture_warning() -> String {
 
 fn no_api_traffic_warning() -> String {
     "No useful API traffic was captured. This usually means no interaction occurred, the browser failed to launch, or requests were served from cache/service worker. Try again and perform a focused workflow while recording.".to_string()
+}
+
+fn html_fragment_warning(count: usize) -> String {
+    format!(
+        "{count} request(s) fetched server-rendered HTML fragments instead of JSON. Tapestry cannot turn HTML fragment endpoints into tools yet (see docs/LIMITATIONS.md); if this site's listing/search flow uses them, expect only secondary config/read tools."
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +378,10 @@ impl CdpObservationBuilder {
                 response_headers: BTreeMap::new(),
                 response_body: None,
                 response_mime_type: None,
+                resource_type: params
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind.to_ascii_lowercase()),
                 warnings: Vec::new(),
                 body_attempted: false,
                 request_finished: false,
@@ -400,6 +418,11 @@ impl CdpObservationBuilder {
             .get("mimeType")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        // responseReceived carries the final resource type; prefer it over
+        // the one guessed at request time.
+        if let Some(kind) = params.get("type").and_then(Value::as_str) {
+            pending.resource_type = Some(kind.to_ascii_lowercase());
+        }
         pending
             .response_headers
             .extend(headers_from_value(response.get("headers")));
@@ -1078,6 +1101,7 @@ struct PendingObservation {
     response_headers: BTreeMap<String, String>,
     response_body: Option<Value>,
     response_mime_type: Option<String>,
+    resource_type: Option<String>,
     warnings: Vec<String>,
     body_attempted: bool,
     request_finished: bool,
@@ -1114,6 +1138,7 @@ impl PendingObservation {
             response_status: self.response_status,
             response_headers: self.response_headers,
             response_body: self.response_body,
+            resource_type: self.resource_type,
             warnings: self.warnings,
         }
     }
@@ -1811,6 +1836,53 @@ mod tests {
     }
 
     #[test]
+    fn xhr_html_fragments_carry_resource_type_and_capture_warning() {
+        let mut builder =
+            CdpObservationBuilder::new(CaptureOptions::default(), "http://example.com");
+        builder.ingest_message(&json!({
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": "1",
+                "type": "XHR",
+                "request": {
+                    "method": "GET",
+                    "url": "http://example.com/products-fragment?search=shoes",
+                    "headers": {}
+                }
+            }
+        }));
+        builder.ingest_message(&json!({
+            "method": "Network.responseReceived",
+            "params": {
+                "requestId": "1",
+                "type": "Fetch",
+                "response": {
+                    "status": 200,
+                    "mimeType": "text/html",
+                    "headers": {"content-type": "text/html; charset=utf-8"}
+                }
+            }
+        }));
+        builder.ingest_message(&json!({
+            "method": "Network.loadingFinished",
+            "params": { "requestId": "1" }
+        }));
+
+        let observations = builder.finalize();
+
+        // responseReceived's type wins over the request-time guess.
+        assert_eq!(observations[0].resource_type.as_deref(), Some("fetch"));
+        assert!(observations[0].is_html_fragment());
+
+        let summary = CaptureSummary::from_observations(&observations);
+        assert_eq!(summary.html_fragment_endpoints, 1);
+        assert!(summary
+            .capture_warnings()
+            .iter()
+            .any(|warning| warning.contains("HTML fragment")));
+    }
+
+    #[test]
     fn base64_response_bodies_are_decoded() {
         let mut builder =
             CdpObservationBuilder::new(CaptureOptions::default(), "http://example.com");
@@ -2090,6 +2162,7 @@ mod tests {
                 response_status: Some(200),
                 response_headers: BTreeMap::new(),
                 response_body: Some(json!({"items":[{"id":1}]})),
+                resource_type: None,
                 warnings: Vec::new(),
             },
             Observation {
@@ -2102,6 +2175,7 @@ mod tests {
                 response_status: Some(200),
                 response_headers: BTreeMap::new(),
                 response_body: None,
+                resource_type: None,
                 warnings: Vec::new(),
             },
         ];
@@ -2138,6 +2212,7 @@ mod tests {
             response_status: Some(200),
             response_headers: BTreeMap::new(),
             response_body: None,
+            resource_type: None,
             warnings: Vec::new(),
         }];
         let summary = CaptureSummary::from_observations(&observations);

@@ -46,6 +46,15 @@ pub(crate) fn run_generate(site: &str) -> Result<()> {
         &serde_json::to_string_pretty(&spec)?,
     )?;
     println!("Generated {} tools for site '{}'", spec.tools.len(), site);
+    let html_fragments = observations
+        .iter()
+        .filter(|obs| obs.is_html_fragment())
+        .count();
+    if html_fragments > 0 {
+        eprintln!(
+            "Warning: {html_fragments} captured request(s) fetched server-rendered HTML fragments instead of JSON. Tapestry cannot turn HTML fragment endpoints into tools yet (see docs/LIMITATIONS.md); if this site's listing/search flow uses them, the generated tools may cover only secondary config/read endpoints."
+        );
+    }
     prune_stale_approvals(site, &spec)?;
     Ok(())
 }

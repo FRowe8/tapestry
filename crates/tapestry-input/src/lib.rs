@@ -192,6 +192,13 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
         .and_then(|r| r.get("content"))
         .and_then(decode_content_body);
 
+    // Chrome DevTools HAR exports annotate each entry with `_resourceType`
+    // ("xhr", "fetch", "document", ...); other exporters omit it.
+    let resource_type = entry
+        .get("_resourceType")
+        .and_then(Value::as_str)
+        .map(|kind| kind.to_ascii_lowercase());
+
     Some(Observation {
         method,
         url: url_str,
@@ -202,6 +209,7 @@ fn parse_entry(entry: &Value) -> Option<Observation> {
         response_status,
         response_headers,
         response_body: response_body.map(redact_body_value),
+        resource_type,
         warnings: Vec::new(),
     })
 }
@@ -276,6 +284,32 @@ mod tests {
         // No secret present: bytes must be preserved so re-import dedup works.
         let url = Url::parse("http://x.test/api?q=a%20b&sort=name").unwrap();
         assert_eq!(redact_url_query(&url), url.to_string());
+    }
+
+    #[test]
+    fn har_resource_type_annotation_is_captured() {
+        // Chrome DevTools exports mark XHR-fetched entries with _resourceType;
+        // that signal identifies HTML fragment endpoints we cannot tool yet.
+        let entry = serde_json::json!({
+            "_resourceType": "XHR",
+            "request": {
+                "method": "GET",
+                "url": "http://x.test/products-fragment?q=shoes",
+                "headers": []
+            },
+            "response": {
+                "status": 200,
+                "headers": [{"name": "Content-Type", "value": "text/html; charset=utf-8"}],
+                "content": {"mimeType": "text/html", "text": "<div>items</div>"}
+            }
+        });
+
+        let obs = parse_entry(&entry).unwrap();
+
+        assert_eq!(obs.resource_type.as_deref(), Some("xhr"));
+        assert!(obs.is_html_fragment());
+        // Non-JSON bodies are still dropped at import; only the signal is kept.
+        assert!(obs.response_body.is_none());
     }
 }
 

@@ -188,8 +188,43 @@ pub struct Observation {
     pub response_status: Option<u16>,
     pub response_headers: BTreeMap<String, String>,
     pub response_body: Option<Value>,
+    /// Browser resource type for the request (lowercased, e.g. "xhr",
+    /// "fetch", "document"), from CDP `Network.requestWillBeSent`'s `type`
+    /// or a Chrome HAR entry's `_resourceType`. `None` when the capture
+    /// source did not record one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+impl Observation {
+    /// True when this request was made by page JavaScript (XHR/fetch) but
+    /// returned server-rendered HTML instead of JSON — the "HTML fragment
+    /// endpoint" pattern some sites use for listing/search flows. Tapestry's
+    /// pipeline is JSON-native, so these endpoints cannot become tools today
+    /// (see docs/LIMITATIONS.md); this shared predicate lets capture
+    /// summaries and diagnostics report that plainly instead of silently
+    /// filtering the traffic as page noise.
+    pub fn is_html_fragment(&self) -> bool {
+        let html_response = self.response_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type")
+                && value.to_ascii_lowercase().contains("text/html")
+        });
+        if !html_response {
+            return false;
+        }
+        let xhr_initiated = self
+            .resource_type
+            .as_deref()
+            .is_some_and(|kind| matches!(kind, "xhr" | "fetch"));
+        let header_signal = self.request_headers.iter().any(|(name, value)| {
+            (name.eq_ignore_ascii_case("sec-fetch-dest") && value.eq_ignore_ascii_case("empty"))
+                || (name.eq_ignore_ascii_case("x-requested-with")
+                    && value.eq_ignore_ascii_case("xmlhttprequest"))
+        });
+        xhr_initiated || header_signal
+    }
 }
 
 /// The JSON shape the runtime returns for every error (auth expiry, approval
@@ -244,5 +279,53 @@ pub fn redact_sensitive_fields(value: Value) -> Value {
             Value::Array(items.into_iter().map(redact_sensitive_fields).collect())
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observation(resource_type: Option<&str>, response_content_type: &str) -> Observation {
+        Observation {
+            method: "GET".to_string(),
+            url: "https://shop.test/products-fragment?q=shoes".to_string(),
+            path: "/products-fragment".to_string(),
+            query: BTreeMap::new(),
+            request_headers: BTreeMap::new(),
+            request_body: None,
+            response_status: Some(200),
+            response_headers: BTreeMap::from([(
+                "Content-Type".to_string(),
+                response_content_type.to_string(),
+            )]),
+            response_body: None,
+            resource_type: resource_type.map(str::to_string),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn html_fragment_requires_html_response_and_xhr_signal() {
+        assert!(observation(Some("xhr"), "text/html; charset=utf-8").is_html_fragment());
+        assert!(observation(Some("fetch"), "text/html").is_html_fragment());
+        // JSON XHR responses are the supported path, not fragments.
+        assert!(!observation(Some("xhr"), "application/json").is_html_fragment());
+        // Plain navigations are pages, not fragments.
+        assert!(!observation(Some("document"), "text/html").is_html_fragment());
+        assert!(!observation(None, "text/html").is_html_fragment());
+    }
+
+    #[test]
+    fn html_fragment_detected_from_request_headers_without_resource_type() {
+        let mut obs = observation(None, "text/html");
+        obs.request_headers
+            .insert("Sec-Fetch-Dest".to_string(), "empty".to_string());
+        assert!(obs.is_html_fragment());
+
+        let mut obs = observation(None, "text/html");
+        obs.request_headers
+            .insert("X-Requested-With".to_string(), "XMLHttpRequest".to_string());
+        assert!(obs.is_html_fragment());
     }
 }

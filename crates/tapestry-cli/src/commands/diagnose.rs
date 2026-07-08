@@ -37,6 +37,7 @@ pub(crate) struct FilteredCounts {
     pub(crate) consent_or_config: usize,
     pub(crate) bot_or_security: usize,
     pub(crate) third_party_non_api: usize,
+    pub(crate) html_fragments: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,12 +226,27 @@ pub(crate) fn format_diagnose_text(report: &DiagnoseReport) -> String {
         format!("Telemetry tools: {}", s.telemetry_tools),
         format!("Commerce API tools: {}", s.commerce_api_tools),
         format!(
-            "Filtered signals: static={}, consent/config={}, bot/security={}, third-party-non-api={}",
-            f.static_assets, f.consent_or_config, f.bot_or_security, f.third_party_non_api
+            "Filtered signals: static={}, consent/config={}, bot/security={}, third-party-non-api={}, html-fragments={}",
+            f.static_assets, f.consent_or_config, f.bot_or_security, f.third_party_non_api, f.html_fragments
         ),
         String::new(),
         "Tools:".to_string(),
     ];
+    if f.html_fragments > 0 {
+        out.push(format!(
+            "{} request(s) fetched server-rendered HTML fragments instead of JSON.",
+            f.html_fragments
+        ));
+        out.push(
+            "Tapestry cannot turn HTML fragment endpoints into tools yet (see docs/LIMITATIONS.md)."
+                .to_string(),
+        );
+        out.push(
+            "If this site's listing/search flow uses them, the main workflow will not produce tools."
+                .to_string(),
+        );
+        out.push(String::new());
+    }
     if s.generated_tools > 0 && s.generated_tools == s.static_resource_tools {
         out.push("Only static JSON/config/localization resources were captured.".to_string());
         out.push("Try interacting with app features that trigger account, save, search, or data API calls.".to_string());
@@ -312,6 +328,10 @@ pub(crate) fn filtered_counts(observations: &[tapestry_core::Observation]) -> Fi
                     })
                     .unwrap_or(false)
             })
+            .count(),
+        html_fragments: observations
+            .iter()
+            .filter(|obs| obs.is_html_fragment())
             .count(),
     }
 }

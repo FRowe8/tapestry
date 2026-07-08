@@ -502,6 +502,16 @@ fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) ->
     }
 
     if is_html_page(obs, &path) {
+        // XHR/fetch-initiated HTML fragments are dropped like any other HTML
+        // page, but get a distinct reason so capture diagnostics can explain
+        // the gap (see docs/LIMITATIONS.md on fragment-based listing flows).
+        if obs.is_html_fragment() {
+            return SignalDecision {
+                keep: false,
+                score: -80,
+                reason: "html_fragment_unsupported".to_string(),
+            };
+        }
         return SignalDecision {
             keep: false,
             score: -80,
@@ -2312,6 +2322,34 @@ mod tests {
     }
 
     #[test]
+    fn xhr_html_fragments_get_a_distinct_filter_reason() {
+        let mut fragment = observation(
+            "GET",
+            "https://shop.test/products-fragment?q=shoes",
+            None,
+            None,
+        );
+        fragment.response_headers.insert(
+            "content-type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        );
+        fragment.resource_type = Some("xhr".to_string());
+
+        let decision = classify_observation_signal(&fragment, Some("shop.test"));
+        assert!(!decision.keep);
+        assert_eq!(decision.reason, "html_fragment_unsupported");
+
+        // The same response fetched as a plain navigation stays a generic page.
+        let mut page = observation("GET", "https://shop.test/products", None, None);
+        page.response_headers
+            .insert("content-type".to_string(), "text/html".to_string());
+
+        let decision = classify_observation_signal(&page, Some("shop.test"));
+        assert!(!decision.keep);
+        assert_eq!(decision.reason, "html_page");
+    }
+
+    #[test]
     fn signal_filter_drops_consent_config_json() {
         let observations = vec![observation(
             "GET",
@@ -3046,6 +3084,7 @@ mod tests {
                 })
                 .unwrap_or_default(),
             response_body,
+            resource_type: None,
             warnings: vec![],
         }
     }
