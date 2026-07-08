@@ -1,0 +1,92 @@
+{
+  "_comment": "Real-agent benchmark tasks (readiness plan Phase 5). Each task has verifiable checks against the answer text: check_all = every string must appear (case-insensitive), check_any = at least one must. Facts for the demo site were pinned against live dummyjson.com at authoring time.",
+  "demo": {
+    "live": true,
+    "tasks": [
+      {
+        "task": "What is the title of the product with id 1?",
+        "check_all": ["essence mascara"]
+      },
+      {
+        "task": "What brand makes the product with id 3?",
+        "check_all": ["velvet touch"]
+      },
+      {
+        "task": "What is the last name of the user with id 1?",
+        "check_all": ["johnson"]
+      },
+      {
+        "task": "Search the products for 'phone' and name one matching product title.",
+        "check_any": ["airpods", "iphone"]
+      },
+      {
+        "task": "Search the products for 'mascara' and tell me the brand of the first result.",
+        "check_all": ["essence"]
+      }
+    ]
+  },
+  "bench-localapp": {
+    "live": true,
+    "localapp_server": true,
+    "tasks": [
+      {
+        "task": "What is the status of the item with id 2?",
+        "check_all": ["draft"]
+      },
+      {
+        "task": "What is the status of the item with id 1?",
+        "check_all": ["published"]
+      },
+      {
+        "task": "What locale does the app config report?",
+        "check_all": ["en-gb"]
+      },
+      {
+        "task": "Is the 'beta' feature flag enabled in the app config? Answer yes or no.",
+        "check_all": ["yes"]
+      },
+      {
+        "task": "List the items and give me every item id, comma separated.",
+        "check_all": ["1", "2"]
+      }
+    ]
+  },
+  "bench-nocodb": {
+    "live": true,
+    "tasks": [
+      {
+        "task": "List the records in the Items table and tell me the title of the record with the highest price.",
+        "check_all": ["delta"]
+      },
+      {
+        "task": "How many records in the Items table have status 'published'?",
+        "check_any": ["three", "3"]
+      },
+      {
+        "task": "What is the price of the record titled 'Gamma'?",
+        "check_all": ["8"]
+      },
+      {
+        "task": "Create a new record in the Items table titled 'AgentMade' with status 'draft', then confirm it was created.",
+        "check_all": ["agentmade"]
+      },
+      {
+        "task": "What tables exist in the base?",
+        "check_all": ["items"]
+      }
+    ]
+  },
+  "bench-ghost": {
+    "live": true,
+    "tasks": [
+      {
+        "task": "List the most recent posts and tell me the title of one of them.",
+        "check_any": ["coming soon", "welcome", "start here"]
+      },
+      {
+        "task": "What is the site title according to the settings?",
+        "check_all": ["tapestry bench"]
+      }
+    ]
+  }
+}

@@ -73,11 +73,11 @@ Done when: `docker compose up` + one script produces the four metrics against tw
 
 ## Phase 5 — Real-agent measurement (product Gap 7 remainder)
 
-- [ ] **Native MCP hookup**: add the `.mcp.json` to a test project and drive tasks through Claude Code's actual MCP client (not the stdio-piping harness used so far — that validated semantics; this validates the integration and measures real token usage).
-- [ ] **Define 5-10 tasks per benchmark app** (Phase 4) and record: task completion rate, tokens consumed per task, and tokens versus a naive baseline that stuffs every generated tool schema into context.
-- [ ] **Publish the table in `docs/BENCHMARKS.md`.** This turns the "90-99% context reduction" estimate into a measurement — it is the project's headline claim and must be evidence-backed before launch publicity.
+- [x] **Native MCP hookup**: `benchmarks/agent_bench.py` drives tasks through Claude Code's actual MCP client (`claude -p --strict-mcp-config` + generated `.mcp.json` → `tapestry serve --live`), restricted to the four meta-tools, measuring real usage from the CLI's own report.
+- [x] **Define 5-10 tasks per benchmark app** — `benchmarks/agent_tasks.json`: 5 each for `demo` and `bench-localapp` (run: 10/10 completed), 5 for `bench-nocodb` and 2 for `bench-ghost` ready for when the Docker suite first runs.
+- [x] **Publish the table in `docs/BENCHMARKS.md`.** Done, with the honest framing: measured completion 10/10 at ~5 turns/task; most measured context is the client harness's own prompt (design-independent); the design-controlled definition surface is ~519 tokens vs a 23,281-token schema dump for the 8-tool demo site (97.8%), validating the 92.8-99.9% estimate range on real sites.
 
-Done when: BENCHMARKS.md contains a real-agent results table produced by a reproducible script/procedure.
+Done when: BENCHMARKS.md contains a real-agent results table produced by a reproducible script/procedure. **Remaining:** extend the table with bench-nocodb/bench-ghost after the Docker suite's first run.
 
 ## Phase 6 — Community scaffolding
 
