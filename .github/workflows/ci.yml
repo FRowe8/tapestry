@@ -38,6 +38,11 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check reports results as a check run, which needs an
+    # explicit checks:write grant on the workflow token.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
 
