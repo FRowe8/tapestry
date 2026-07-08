@@ -87,7 +87,7 @@ impl CaptureSummary {
             total_observations: observations.len(),
             candidate_api_observations: observations
                 .iter()
-                .filter(|obs| is_candidate_api_observation(obs))
+                .filter(|obs| tapestry_core::signal::is_candidate_api_observation(obs))
                 .count(),
             observations_with_response_bodies: observations
                 .iter()
@@ -95,11 +95,11 @@ impl CaptureSummary {
                 .count(),
             json_responses: observations
                 .iter()
-                .filter(|obs| has_json_signal(obs))
+                .filter(|obs| tapestry_core::signal::is_json_response(obs))
                 .count(),
             graphql_requests: observations
                 .iter()
-                .filter(|obs| !graphql_operations(obs).is_empty())
+                .filter(|obs| tapestry_core::signal::is_graphql_request(obs))
                 .count(),
             html_fragment_endpoints: observations
                 .iter()
@@ -1299,39 +1299,6 @@ fn response_body_should_skip(mime_type: Option<&str>, path: &str) -> bool {
         || path.ends_with(".otf")
         || path.ends_with(".css")
         || path.ends_with(".js")
-}
-
-pub(crate) fn is_candidate_api_observation(obs: &Observation) -> bool {
-    let path = obs.path.to_ascii_lowercase();
-    let method = obs.method.to_ascii_uppercase();
-    method != "GET"
-        || path.contains("api")
-        || path.contains("graphql")
-        || obs.request_body.is_some()
-}
-
-pub(crate) fn has_json_signal(obs: &Observation) -> bool {
-    obs.response_body.is_some()
-}
-
-pub(crate) fn graphql_operations(obs: &Observation) -> Vec<String> {
-    match &obs.request_body {
-        Some(Value::Object(body)) => body
-            .get("operationName")
-            .and_then(Value::as_str)
-            .map(|value| vec![value.to_string()])
-            .unwrap_or_default(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| {
-                item.as_object()
-                    .and_then(|body| body.get("operationName"))
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 struct WsClient {

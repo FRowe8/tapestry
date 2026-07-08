@@ -1,6 +1,11 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use tapestry_core::signal::{
+    body_contains_telemetry_key, has_json_signal, header_contains, infer_primary_host, is_api_path,
+    is_bot_or_security_telemetry, is_consent_or_config_asset, is_graphql_request,
+    is_static_asset_path, is_version_segment, semantic_operation_name,
+};
 use tapestry_core::*;
 use tracing::{info, warn};
 
@@ -485,7 +490,7 @@ fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) ->
         }
     }
 
-    if is_consent_or_config_asset(obs, &path) {
+    if is_consent_or_config_asset(obs) {
         return SignalDecision {
             keep: false,
             score: -95,
@@ -519,7 +524,7 @@ fn classify_observation_signal(obs: &Observation, primary_host: Option<&str>) ->
         };
     }
 
-    if is_bot_or_security_telemetry(obs, &path) {
+    if is_bot_or_security_telemetry(obs) {
         return SignalDecision {
             keep: false,
             score: -90,
@@ -1490,10 +1495,6 @@ fn graphql_operation_type(obs: &Observation) -> Option<&'static str> {
     }
 }
 
-fn is_graphql_request(obs: &Observation) -> bool {
-    graphql_operation_details(obs).is_some()
-}
-
 fn object_variables(value: Option<&Value>) -> Option<BTreeMap<String, Value>> {
     let Value::Object(map) = value? else {
         return Some(BTreeMap::new());
@@ -1503,34 +1504,6 @@ fn object_variables(value: Option<&Value>) -> Option<BTreeMap<String, Value>> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     )
-}
-
-fn semantic_operation_name(body: &Option<Value>) -> Option<String> {
-    let value = body.as_ref()?;
-    match value {
-        Value::Object(map) => [
-            "operationName",
-            "operation",
-            "action",
-            "type",
-            "method",
-            "query",
-        ]
-        .iter()
-        .find_map(|key| map.get(*key).and_then(Value::as_str))
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            map.get("requests")
-                .and_then(Value::as_array)
-                .and_then(|values| values.first())
-                .and_then(|value| semantic_operation_name(&Some(value.clone())))
-        }),
-        Value::Array(values) => values
-            .first()
-            .and_then(|value| semantic_operation_name(&Some(value.clone()))),
-        _ => None,
-    }
 }
 
 fn is_opaque_root_post_json(observations: &[&Observation]) -> bool {
@@ -1608,7 +1581,7 @@ fn tool_name(
     let segments: Vec<&str> = path
         .trim_matches('/')
         .split('/')
-        .filter(|seg| !seg.starts_with('{') && !is_version(seg) && *seg != "api")
+        .filter(|seg| !seg.starts_with('{') && !is_version_segment(seg) && *seg != "api")
         .collect();
     let resource = segments.last().copied().unwrap_or("tool");
 
@@ -1718,149 +1691,6 @@ fn base_url_for(obs: &Observation) -> Option<String> {
     Some(format!("{}://{}{}", url.scheme(), url.host_str()?, port))
 }
 
-fn has_json_signal(obs: &Observation) -> bool {
-    obs.request_body.is_some()
-        || obs.response_body.is_some()
-        || header_contains(&obs.request_headers, "content-type", "json")
-        || header_contains(&obs.request_headers, "accept", "json")
-        || header_contains(&obs.response_headers, "content-type", "json")
-}
-
-fn is_static_asset_path(path: &str) -> bool {
-    let asset_extensions = [
-        ".css", ".js", ".mjs", ".map", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp4", ".webm", ".mp3", ".wav", ".pdf",
-    ];
-    asset_extensions
-        .iter()
-        .any(|extension| path.ends_with(extension))
-}
-
-fn is_consent_or_config_asset(obs: &Observation, path: &str) -> bool {
-    let consent_markers = [
-        "/assets/cmp/",
-        "/cmp/",
-        "/consent/",
-        "/privacy/",
-        "/cookie/",
-        "/cookies/",
-        "/onetrust/",
-        "/trustarc/",
-    ];
-    if consent_markers.iter().any(|marker| path.contains(marker)) {
-        return true;
-    }
-
-    obs.method == "GET"
-        && obs.request_body.is_none()
-        && path.contains("/assets/")
-        && path.ends_with(".json")
-        && response_looks_static_config(obs.response_body.as_ref())
-}
-
-fn response_looks_static_config(value: Option<&Value>) -> bool {
-    let Some(value) = value else {
-        return true;
-    };
-    let text = value.to_string().to_ascii_lowercase();
-    [
-        "consent", "cookie", "privacy", "onetrust", "trustarc", "cmp", "locale", "config",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-}
-
-fn is_bot_or_security_telemetry(obs: &Observation, path: &str) -> bool {
-    let path_markers = [
-        "/akam/",
-        "/akamai/",
-        "/bot/",
-        "/challenge/",
-        "/captcha/",
-        "/risk/",
-        "/fingerprint/",
-        "/telemetry/",
-    ];
-    if path_markers.iter().any(|marker| path.contains(marker)) {
-        return true;
-    }
-
-    if body_contains_telemetry_key(obs.request_body.as_ref()) {
-        return true;
-    }
-
-    obs.method == "POST"
-        && has_opaque_path_segment(path)
-        && !is_graphql_request(obs)
-        && semantic_operation_name(&obs.request_body).is_none()
-        && response_is_empty_or_opaque(obs.response_body.as_ref())
-}
-
-fn body_contains_telemetry_key(value: Option<&Value>) -> bool {
-    let Some(value) = value else {
-        return false;
-    };
-    match value {
-        Value::Object(map) => map.iter().any(|(key, value)| {
-            let key = key.to_ascii_lowercase();
-            matches!(
-                key.as_str(),
-                "sensor_data"
-                    | "_fingerprint"
-                    | "fingerprint"
-                    | "challenge"
-                    | "captcha"
-                    | "bot"
-                    | "risk"
-                    | "akamai"
-            ) || body_contains_telemetry_key(Some(value))
-        }),
-        Value::Array(values) => values
-            .iter()
-            .any(|value| body_contains_telemetry_key(Some(value))),
-        Value::String(value) => {
-            let value = value.to_ascii_lowercase();
-            value.contains("sensor_data")
-                || value.contains("fingerprint")
-                || value.contains("akamai")
-        }
-        _ => false,
-    }
-}
-
-fn has_opaque_path_segment(path: &str) -> bool {
-    path.trim_matches('/').split('/').any(|segment| {
-        segment.len() >= 16
-            && segment
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric())
-                .count()
-                >= segment.len() * 3 / 4
-            && !contains_semantic_word(segment)
-    })
-}
-
-fn contains_semantic_word(segment: &str) -> bool {
-    let segment = segment.to_ascii_lowercase();
-    [
-        "api", "search", "basket", "cart", "product", "item", "order", "user", "account", "list",
-        "status", "graphql", "category", "grocer",
-    ]
-    .iter()
-    .any(|word| segment.contains(word))
-}
-
-fn response_is_empty_or_opaque(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => true,
-        Some(Value::Object(map)) => {
-            map.is_empty() || map.keys().all(|key| !contains_semantic_word(key))
-        }
-        Some(Value::String(value)) => value.len() > 64 && !contains_semantic_word(value),
-        _ => false,
-    }
-}
-
 fn is_html_page(obs: &Observation, path: &str) -> bool {
     !is_api_path(path)
         && (header_contains(&obs.response_headers, "content-type", "text/html")
@@ -1878,16 +1708,6 @@ fn is_likely_page_path(path: &str) -> bool {
             .contains('.')
 }
 
-fn is_api_path(path: &str) -> bool {
-    let trimmed = path.trim_matches('/');
-    trimmed == "graphql"
-        || trimmed.starts_with("api/")
-        || trimmed.starts_with("graphql/")
-        || trimmed.starts_with("rest/")
-        || trimmed.starts_with("rpc/")
-        || trimmed.split('/').next().map(is_version).unwrap_or(false)
-}
-
 fn is_static_segment(seg: &str) -> bool {
     matches!(
         seg,
@@ -1901,11 +1721,7 @@ fn is_static_segment(seg: &str) -> bool {
             | "me"
             | "current"
             | "api"
-    ) || is_version(seg)
-}
-
-fn is_version(seg: &str) -> bool {
-    seg.len() >= 2 && seg.starts_with('v') && seg[1..].chars().all(|c| c.is_ascii_digit())
+    ) || is_version_segment(seg)
 }
 
 fn typed_value(seg: &str) -> Option<Value> {
@@ -2045,45 +1861,10 @@ fn is_scalar(value: &Value) -> bool {
     )
 }
 
-fn header_contains(headers: &BTreeMap<String, String>, name: &str, needle: &str) -> bool {
-    headers.iter().any(|(header_name, value)| {
-        header_name.eq_ignore_ascii_case(name)
-            && value
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
-    })
-}
-
 fn has_header(headers: &BTreeMap<String, String>, name: &str) -> bool {
     headers
         .keys()
         .any(|header_name| header_name.eq_ignore_ascii_case(name))
-}
-
-fn infer_primary_host(observations: &[Observation]) -> Option<String> {
-    // Track (count, first_seen_index) per host; ties broken by first-seen ordering.
-    let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    for (idx, obs) in observations.iter().enumerate() {
-        let Some(host) = url::Url::parse(&obs.url)
-            .ok()
-            .and_then(|url| url.host_str().map(ToOwned::to_owned))
-        else {
-            continue;
-        };
-        let entry = counts.entry(host).or_insert((0, idx));
-        entry.0 += 1;
-    }
-
-    counts
-        .into_iter()
-        .max_by(
-            |(_, (left_count, left_first)), (_, (right_count, right_first))| {
-                left_count
-                    .cmp(right_count)
-                    .then_with(|| right_first.cmp(left_first)) // lower first_seen wins on tie
-            },
-        )
-        .map(|(host, _)| host)
 }
 
 fn redact_value(value: Value) -> Value {

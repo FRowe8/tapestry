@@ -5,6 +5,7 @@
 use crate::commands::review::{is_static_resource_kind_label, resource_kind_label, schema_present};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use tapestry_core::signal;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DiagnoseReport {
@@ -81,10 +82,7 @@ pub(crate) fn diagnose_site(
                 .count(),
             json_responses: observations
                 .iter()
-                .filter(|obs| {
-                    obs.response_body.is_some()
-                        || header_contains_cli(&obs.response_headers, "content-type", "json")
-                })
+                .filter(|obs| signal::is_json_response(obs))
                 .count(),
             graphql_requests: observations
                 .iter()
@@ -303,28 +301,30 @@ pub(crate) fn format_diagnose_text(report: &DiagnoseReport) -> String {
 }
 
 pub(crate) fn filtered_counts(observations: &[tapestry_core::Observation]) -> FilteredCounts {
-    let primary = primary_host_cli(observations);
+    let primary = signal::infer_primary_host(observations);
     FilteredCounts {
         static_assets: observations
             .iter()
-            .filter(|obs| is_static_asset_path_cli(&obs.path))
+            .filter(|obs| signal::is_static_asset_path(&obs.path))
             .count(),
         consent_or_config: observations
             .iter()
-            .filter(|obs| is_consent_or_config_cli(obs))
+            .filter(|obs| signal::is_consent_or_config_asset(obs))
             .count(),
         bot_or_security: observations
             .iter()
-            .filter(|obs| is_bot_or_security_cli(obs))
+            .filter(|obs| signal::is_bot_or_security_telemetry(obs))
             .count(),
         third_party_non_api: observations
             .iter()
             .filter(|obs| {
                 primary
                     .as_deref()
-                    .zip(host_for(&obs.url).as_deref())
+                    .zip(signal::host_for(&obs.url).as_deref())
                     .map(|(primary, host)| {
-                        host != primary && !has_json_signal_cli(obs) && !is_api_path_cli(&obs.path)
+                        host != primary
+                            && !signal::has_json_signal(obs)
+                            && !signal::is_api_path(&obs.path)
                     })
                     .unwrap_or(false)
             })
@@ -337,13 +337,7 @@ pub(crate) fn filtered_counts(observations: &[tapestry_core::Observation]) -> Fi
 }
 
 pub(crate) fn is_candidate_api_observation(obs: &tapestry_core::Observation) -> bool {
-    !is_static_asset_path_cli(&obs.path)
-        && !is_consent_or_config_cli(obs)
-        && !is_bot_or_security_cli(obs)
-        && (is_api_path_cli(&obs.path)
-            || has_json_signal_cli(obs)
-            || obs.request_body.is_some()
-            || matches!(obs.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE"))
+    signal::is_candidate_api_observation(obs)
 }
 
 pub(crate) fn observation_matches_tool(
@@ -424,150 +418,6 @@ pub(crate) fn graphql_response_mapped_cli(obs: &tapestry_core::Observation) -> b
     }
 }
 
-pub(crate) fn header_contains_cli(
-    headers: &std::collections::BTreeMap<String, String>,
-    name: &str,
-    needle: &str,
-) -> bool {
-    headers.iter().any(|(header_name, value)| {
-        header_name.eq_ignore_ascii_case(name)
-            && value
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
-    })
-}
-
-pub(crate) fn has_json_signal_cli(obs: &tapestry_core::Observation) -> bool {
-    obs.request_body.is_some()
-        || obs.response_body.is_some()
-        || header_contains_cli(&obs.request_headers, "content-type", "json")
-        || header_contains_cli(&obs.request_headers, "accept", "json")
-        || header_contains_cli(&obs.response_headers, "content-type", "json")
-}
-
-pub(crate) fn is_static_asset_path_cli(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    [
-        ".css", ".js", ".mjs", ".map", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp4", ".webm", ".mp3", ".wav", ".pdf",
-    ]
-    .iter()
-    .any(|extension| path.ends_with(extension))
-}
-
-pub(crate) fn is_consent_or_config_cli(obs: &tapestry_core::Observation) -> bool {
-    let path = obs.path.to_ascii_lowercase();
-    [
-        "/assets/cmp/",
-        "/cmp/",
-        "/consent/",
-        "/privacy/",
-        "/cookie/",
-        "/cookies/",
-        "/onetrust/",
-        "/trustarc/",
-    ]
-    .iter()
-    .any(|marker| path.contains(marker))
-        || (obs.method == "GET"
-            && obs.request_body.is_none()
-            && path.contains("/assets/")
-            && path.ends_with(".json"))
-}
-
-pub(crate) fn is_bot_or_security_cli(obs: &tapestry_core::Observation) -> bool {
-    let path = obs.path.to_ascii_lowercase();
-    [
-        "/akam/",
-        "/akamai/",
-        "/bot/",
-        "/challenge/",
-        "/captcha/",
-        "/risk/",
-        "/fingerprint/",
-        "/telemetry/",
-    ]
-    .iter()
-    .any(|marker| path.contains(marker))
-        || body_contains_telemetry_key_cli(obs.request_body.as_ref())
-        || (obs.method == "POST"
-            && !is_static_asset_path_cli(&path)
-            && path
-                .trim_matches('/')
-                .split('/')
-                .any(|segment| segment.len() >= 16 && !contains_semantic_word_cli(segment)))
-}
-
-pub(crate) fn body_contains_telemetry_key_cli(value: Option<&Value>) -> bool {
-    match value {
-        Some(Value::Object(map)) => map.iter().any(|(key, value)| {
-            matches!(
-                key.to_ascii_lowercase().as_str(),
-                "sensor_data"
-                    | "_fingerprint"
-                    | "fingerprint"
-                    | "challenge"
-                    | "captcha"
-                    | "bot"
-                    | "risk"
-                    | "akamai"
-            ) || body_contains_telemetry_key_cli(Some(value))
-        }),
-        Some(Value::Array(values)) => values
-            .iter()
-            .any(|value| body_contains_telemetry_key_cli(Some(value))),
-        Some(Value::String(value)) => value.to_ascii_lowercase().contains("sensor_data"),
-        _ => false,
-    }
-}
-
 pub(crate) fn contains_any_cli(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| text.contains(phrase))
-}
-
-pub(crate) fn contains_semantic_word_cli(segment: &str) -> bool {
-    let segment = segment.to_ascii_lowercase();
-    [
-        "api", "search", "basket", "cart", "product", "item", "order", "user", "account", "list",
-        "status", "graphql", "category", "grocer",
-    ]
-    .iter()
-    .any(|word| segment.contains(word))
-}
-
-pub(crate) fn is_api_path_cli(path: &str) -> bool {
-    let trimmed = path.trim_matches('/').to_ascii_lowercase();
-    trimmed == "graphql"
-        || trimmed.starts_with("api/")
-        || trimmed.starts_with("graphql/")
-        || trimmed.starts_with("rest/")
-        || trimmed.starts_with("rpc/")
-        || trimmed
-            .split('/')
-            .next()
-            .map(|seg| {
-                seg.len() >= 2
-                    && seg.starts_with('v')
-                    && seg[1..].chars().all(|ch| ch.is_ascii_digit())
-            })
-            .unwrap_or(false)
-}
-
-pub(crate) fn primary_host_cli(observations: &[tapestry_core::Observation]) -> Option<String> {
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for obs in observations {
-        if let Some(host) = host_for(&obs.url) {
-            *counts.entry(host).or_default() += 1;
-        }
-    }
-    counts
-        .into_iter()
-        .max_by_key(|(_, count)| *count)
-        .map(|(host, _)| host)
-}
-
-pub(crate) fn host_for(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(ToOwned::to_owned))
 }
