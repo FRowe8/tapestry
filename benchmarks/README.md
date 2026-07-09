@@ -60,6 +60,33 @@ are for.
   query-parameter credential injection is a candidate roadmap item. Judge
   Ghost's numbers accordingly.
 
+## Real-agent measurement
+
+`python benchmarks/agent_bench.py` drives the tasks in `agent_tasks.json`
+through Claude Code's actual headless MCP client (`claude -p
+--strict-mcp-config` → `tapestry serve --live`), restricted to the four
+meta-tools, and records success (verifiable string checks), turns, and real
+token usage. The model is pinned to a realistic mid-tier default
+(`claude-sonnet-5`); note the model next to any published numbers. Results
+feed the table in `docs/BENCHMARKS.md`.
+
+## Planned: browser-control baseline
+
+The project's strongest qualitative claim — direct tool calls are far
+cheaper and faster than driving a browser — is **not yet measured**, and no
+public copy should put numbers on it until it is. The defined method, once
+the Docker suite runs (NocoDB has a real UI):
+
+1. Same tasks, same client (`claude -p`), same pinned model.
+2. Arm A: tapestry MCP (four meta-tools), as `agent_bench.py` does today.
+3. Arm B: a browser-automation MCP (e.g. Playwright MCP) pointed at the
+   app's UI, with the agent completing the identical tasks by navigating,
+   logging in, and reading the page.
+4. Publish side by side: success rate, turns, fresh/cached/output tokens,
+   wall-clock time, and cost per task. The harness overhead (the client's
+   own system prompt) is identical in both arms and cancels out; the delta
+   is the per-step payload — structured JSON versus page snapshots.
+
 ## Reproducibility rules
 
 - Image versions are pinned in `docker-compose.yml`. Bump them deliberately,

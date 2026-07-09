@@ -50,25 +50,30 @@ Target v0.1: <30%.
 
 Measured on the current corpus: the meta-tool surface is ~519 tokens regardless of site size; real sites (7-35 tools) show 92.8-99.9% reduction, consistent with the PRD's 90-99% claim. Small sites (~3 tools) show ~46% — the fixed meta-tool cost only pays off once a site has more than a handful of tools.
 
-## Real-agent measurement (measured 2026-07-08)
+## Real-agent measurement (measured 2026-07-09)
 
 Produced by `python benchmarks/agent_bench.py`: each task runs in a fresh
 headless Claude Code instance (`claude -p --strict-mcp-config`, model
-claude-fable-5) connected to `tapestry serve --live` over actual MCP and
-restricted to the four meta-tools. Success is judged by pinned,
-verifiable string checks against the final answer (`benchmarks/agent_tasks.json`);
+**claude-sonnet-5** — a realistic mid-tier default; Claude Code also uses
+haiku internally) connected to `tapestry serve --live` over actual MCP and
+restricted to the four meta-tools. Success is judged by pinned, verifiable
+string checks against the final answer (`benchmarks/agent_tasks.json`);
 token counts come from the CLI's own usage report.
 
-| site | tools | tasks completed | mean turns | fresh input tok/task | cache-read tok/task | output tok/task | naive schema dump (est) |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| demo (dummyjson.com, live) | 8 | **5/5** | 5.0 | 21,046 | 95,982 | 534 | 23,281 |
-| bench-localapp (live) | 3 | **5/5** | 4.8 | 11,400 | 93,668 | 515 | 1,073 |
+| site | tools | tasks completed | mean turns | fresh input tok/task | cache-read tok/task | output tok/task | cost/task | naive schema dump (est) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| demo (dummyjson.com, live) | 8 | **5/5** | 4.8 | 20,817 | 143,171 | 427 | $0.18 | 23,281 |
+| bench-localapp (live) | 3 | **5/5** | 5.0 | 11,763 | 152,083 | 442 | $0.12 | 1,073 |
+
+An initial run of the same tasks on claude-fable-5 also completed 10/10 at
+~5 turns (at roughly 3x the cost per task), so completion is robust across
+model tiers.
 
 How to read this honestly:
 
 - **Task completion through the real MCP client is 10/10.** The agent used
   only `search_tools` → `get_tool_schema` → `call_tool`, averaging ~5 turns
-  and ~$0.26-0.51/task at Fable pricing.
+  at $0.12-0.18/task on Sonnet pricing.
 - **Most measured context is the client harness, not the tool design.**
   Claude Code's own system prompt (~13k tokens, cached after the first
   request) dominates both fresh input and cache reads, and would be
@@ -85,6 +90,12 @@ How to read this honestly:
   estimate-based finding that the design pays off past a handful of tools.
 - `bench-nocodb` and `bench-ghost` tasks are defined and will join the
   table after the Docker suite's first run (Phase 4 remainder).
+- **The browser-control comparison is not yet measured.** These numbers
+  compare Tapestry against naive schema stuffing, not against a
+  browser-driving agent; the defined two-arm method for that (same tasks,
+  same client and model, Playwright MCP vs tapestry MCP on NocoDB's real
+  UI) is in `benchmarks/README.md`. Until it runs, the browser comparison
+  stays qualitative in all public copy.
 
 ### Capture parity (HAR vs CDP)
 

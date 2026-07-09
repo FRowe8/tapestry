@@ -240,7 +240,13 @@ def print_summary(results):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sites", default=None, help="Comma-separated site subset")
-    parser.add_argument("--model", default=None, help="Model override for claude -p")
+    parser.add_argument(
+        "--model",
+        default="claude-sonnet-5",
+        help="Model for claude -p. Pinned to a realistic mid-tier default so "
+        "published numbers reflect what people would actually run; override "
+        "deliberately and note the model next to any published results.",
+    )
     args = parser.parse_args()
 
     if shutil.which("claude") is None:

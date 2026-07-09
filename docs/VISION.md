@@ -21,10 +21,13 @@ Agents today have two options there:
 
 Tapestry offers a third path: **demonstrate the workflow once, get
 deterministic tools forever.** A captured session becomes typed, evidence-
-backed, safety-classified tools that execute as direct HTTP calls — orders of
-magnitude cheaper and faster than browser driving, and *governable*: every
-tool has provenance (`get_evidence`), a safety class, an approval gate, drift
-detection, and redaction guarantees.
+backed, safety-classified tools that execute as direct HTTP calls — a small
+structured JSON response per step instead of a page snapshot per click,
+which should make it far cheaper and faster than browser driving (the
+side-by-side browser-agent measurement is a defined follow-up in
+`benchmarks/README.md`; until it runs, keep that comparison qualitative in
+public copy). And *governable*: every tool has provenance (`get_evidence`),
+a safety class, an approval gate, drift detection, and redaction guarantees.
 
 The durable differentiator is **not** token savings — model prices fall and
 context windows grow. It is **determinism, auditability, and the safety
