@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose an improvement or new capability
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: `docs/VISION.md` describes where the project is
+        going and its coverage tiers (what Tapestry deliberately won't do —
+        anti-bot evasion, page scraping, OAuth automation). Proposals that
+        fit the vision land much faster.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can't you do today? Concrete workflow, not solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety interaction
+      description: >-
+        Does this touch redaction, credentials, approvals, or what tools an
+        agent can execute? Those guarantees can't be weakened
+        (docs/SAFETY_SECURITY.md).

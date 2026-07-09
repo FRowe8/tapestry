@@ -1,0 +1,45 @@
+name: Bug report
+description: Something broke or behaved wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never attach a real browser capture.** HARs and CDP recordings from
+        real sessions contain session cookies, tokens, and personal data.
+        Reproduce with a synthetic fixture, or sanitize with `tapestry redact`
+        and verify the output by eye before attaching. Security issues
+        (credential leaks, redaction failures, approval bypasses) go through
+        [private reporting](../security/advisories/new), not issues.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, what did you expect, what did you get?
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: tapestry doctor output
+      description: Paste the full output of `tapestry doctor`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        Exact commands, plus a synthetic fixture or `tapestry redact`ed
+        capture if the bug needs one. Describe the site shape (e.g. "REST
+        API under /api/v2, cookie auth") rather than attaching real traffic.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`tapestry --version`, or the commit hash if built from source"
+    validations:
+      required: true

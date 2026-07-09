@@ -10,7 +10,7 @@ It is designed for SaaS tools, internal portals, admin dashboards, and legacy we
 
 **Tapestry turns captured web app traffic into structured, low-token tools for AI agents and automation.**
 
-Tapestry is not a scraper, not a bot framework, and not primarily an MCP server generator. MCP is an optional adapter. The core artifact is a ToolSpec, and the primary runtime is a compact low-token protocol.
+Tapestry is not a scraper and not a bot framework. The core artifact is a ToolSpec; agents consume it through four MCP meta-tools (`search_tools`, `get_tool_schema`, `call_tool`, `get_evidence`) served over stdio — a compact low-token surface that never exposes generated tools individually. (An earlier revision called MCP "an optional adapter"; field testing made it the delivery surface, and the four-meta-tool design is now load-bearing product identity — see CLAUDE.md's hard rules.)
 
 ## 3. Primary Use Cases
 
@@ -49,7 +49,7 @@ Teams can capture a browser session and generate a provisional ToolSpec before i
 - CAPTCHA solving or anti-bot bypass.
 - Universal compatibility with all web apps.
 - Automatic OAuth/SSO/MFA handling.
-- MCP as the primary architecture.
+- Exposing generated tools as individual MCP tools (the four-meta-tool surface is the design; see docs/VISION.md).
 - Team sharing or marketplace distribution.
 
 ## 6. Architecture
@@ -115,7 +115,8 @@ Deferred:
 
 - Live recording proxy.
 - JS crawling.
-- MCP adapter.
 - OAuth automation.
 - Team sharing.
 - WebSocket/SSE support.
+
+(The MCP adapter was originally deferred here; it shipped as `tapestry serve` and became the primary agent surface.)

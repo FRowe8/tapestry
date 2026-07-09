@@ -68,7 +68,7 @@ crates/tapestry-cli/src/
   mcp.rs                MCP stdio server (`tapestry serve`) — the four
                         meta-tools only; never exposes generated tools
                         individually
-  tests.rs              the CLI test suite (191 tests live here and in
+  tests.rs              the CLI test suite (the CLI test suite lives here and in
                         the other crates' own `mod tests`)
   commands/
     approve.rs          `tapestry approve`

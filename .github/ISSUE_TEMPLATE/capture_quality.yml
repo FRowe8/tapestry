@@ -1,0 +1,48 @@
+name: Capture quality report
+description: A site captured fine but generated weak, missing, or wrong tools
+labels: [capture-quality]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the right template when recording/import *worked* but the
+        generated tools are not useful — missing endpoints, wrong schemas,
+        noise tools, a listing flow that produced nothing. **Never attach a
+        real capture**; `tapestry diagnose` output and a description of the
+        site's traffic shape are usually enough.
+  - type: textarea
+    id: expectation
+    attributes:
+      label: What you expected tools for
+      description: The workflow you captured and what an agent should be able to do.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: tapestry diagnose output
+      description: Paste the full output of `tapestry diagnose <site>`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Site traffic shape
+      description: >-
+        How does the site serve data? (JSON REST, GraphQL, HTML fragments
+        over XHR, streamed responses, ...) The warnings printed at record/
+        generate time are useful here. See docs/LIMITATIONS.md for the
+        currently known gaps.
+    validations:
+      required: true
+  - type: dropdown
+    id: method
+    attributes:
+      label: Capture method
+      options:
+        - tapestry record (CDP)
+        - DevTools HAR export + tapestry import
+        - both
+    validations:
+      required: true

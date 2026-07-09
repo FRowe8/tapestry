@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/FRowe8/tapestry/security/advisories/new
+    about: Credential leaks, redaction failures, and approval bypasses — report privately, never in a public issue.

@@ -12,14 +12,14 @@ Already done (do not redo):
 - A real LLM agent (Claude Sonnet, driving the MCP server turn by turn) completed 4/4 tasks against a live API at the theoretical-minimum call count. Its findings (ranking, naming, schema token bloat, approval message text, unknown-key handling, live-response redaction, pagination defaults) are all fixed with regression tests.
 - Git history was rewritten with `git filter-repo` to purge all personal browser captures; the repo pack is ~200KB. The 13 private HARs live untracked in `.tapestry-dev/private-fixtures/` on the maintainer's machine only.
 - License is MIT. The GitHub repo `FRowe8/tapestry` is a fresh private repo containing only the cleaned history (the pre-cleanup repo was renamed to `tapestry-archive-prehistory` and should eventually be deleted).
-- Test suite: 191 tests, all passing, across tapestry-core / -input / -analyzer / -runtime / -cli.
+- Test suite: ~200 tests, all passing, across tapestry-core / -input / -analyzer / -runtime / -cli.
 
 ## Hard rules for anyone working in this repo
 
 1. **HARs from real browser sessions are secrets.** Never commit one, never copy one out of `.tapestry-dev/`, never paste their contents into issues, docs, or fixtures. Only synthetic or verified-clean fixtures belong in `examples/fixtures/` (current clean set: `simple.har`, `localapp.har`, `redaction.har`, `browser-noise.har`, `dummyjson-api.har`).
 2. **Never weaken the redaction or approval pipeline** to make a test or demo pass. If a test needs sensitive-looking data, seed it with obvious sentinels (see `redaction.har`'s `FAKESECRET` pattern).
 3. **The four-meta-tool design is the product.** Do not add an MCP mode that exposes generated tools individually.
-4. **Run `cargo test --workspace` before every commit.** All 191+ tests must pass. Run `cargo fmt --all` and keep `cargo clippy` from getting worse.
+4. **Run `cargo test --workspace` before every commit.** All ~200 tests must pass. Run `cargo fmt --all` and keep `cargo clippy` from getting worse.
 5. `.tapestry-dev/` is the maintainer's local site storage (includes browser profiles with live cookies). Never commit it, never print its credential files.
 
 ## Phase 0 — Repo mechanics
@@ -83,9 +83,9 @@ Done when: BENCHMARKS.md contains a real-agent results table produced by a repro
 
 - [x] **CONTRIBUTING.md**: build instructions, test instructions, the hard rules from this document (especially the HAR-secrecy rule), PR expectations (tests for behavior changes), and the "capture fixtures must be synthetic" policy.
 - [x] **SECURITY.md**: private vulnerability reporting path (GitHub security advisories), scope statement (credential handling, redaction, approval gates are all security surface).
-- [ ] **Issue templates**: bug report (require `tapestry doctor` output; forbid attaching real HARs — ask for `tapestry redact`ed or synthetic reproductions), feature request, capture-quality report.
-- [ ] **Decide crates.io publishing.** Check name availability for the five crates; publishing is optional at launch but reserve names early if desired.
-- [ ] **README positioning section**: what Tapestry is for (internal, self-hosted, B2B apps), what it is explicitly not for (consumer sites with bot defense, ToS-hostile automation, CAPTCHA bypass), and the safety model in three sentences. The safety-first stance is the project's differentiator — lead with it.
+- [x] **Issue templates**: bug report (requires `tapestry doctor` output; forbids real HARs — synthetic or `tapestry redact`ed reproductions only), feature request (points at VISION's coverage tiers), capture-quality report (requires `diagnose` output), plus a config link routing security reports to private advisories.
+- [x] **Decide crates.io publishing.** Checked 2026-07-09: the bare `tapestry` name is taken (an abandoned 2021 2D-grid crate), but all five actual crate names — `tapestry-core`, `tapestry-input`, `tapestry-analyzer`, `tapestry-runtime`, `tapestry-cli` — are **available**. The install path is `cargo install tapestry-cli`, so the bare name doesn't matter. If publishing, reserve the five names before announcing (maintainer: needs a crates.io account/token).
+- [x] **README positioning section**: satisfied by the existing "What Tapestry is for" section — internal/self-hosted/B2B scope, the explicit not-for list (bot defense, ToS-hostile automation, CAPTCHAs), and the safety model in three sentences with safety-as-differentiator framing.
 
 Done when: all files exist and a stranger could file a useful bug and submit a compliant PR without asking anything.
 
